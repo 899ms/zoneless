@@ -21,10 +21,19 @@ const STATUS_CHIP_MAP: Record<string, ChipType> = {
   available: 'green',
   scheduled: 'green',
   enabled: 'green',
+  normal: 'green',
+  trialing: 'green',
 
   // Yellow - Pending states
   pending: 'yellow',
   processing: 'yellow',
+  requires_capture: 'yellow',
+  requires_confirmation: 'yellow',
+  requires_payment_method: 'yellow',
+  elevated: 'yellow',
+  past_due: 'yellow',
+  unpaid: 'yellow',
+  open: 'yellow',
 
   // Red - Failure/Restricted states
   declined: 'red',
@@ -32,22 +41,34 @@ const STATUS_CHIP_MAP: Record<string, ChipType> = {
   overdue: 'red',
   error: 'red',
   restricted: 'red',
+  rejected: 'red',
+  highest: 'red',
+  uncollectible: 'red',
 
   // Blue - Info states
   draft: 'blue',
   working: 'blue',
   in_transit: 'blue',
+  in_review: 'blue',
+  default: 'blue',
+  paused: 'blue',
 
   // Orange - Warning states
   disputed: 'orange',
   requires_action: 'orange',
+  restricted_soon: 'orange',
 
   // Grey - Neutral states
   refunded: 'grey',
   cancelled: 'grey',
   canceled: 'grey',
+  incomplete: 'grey',
+  incomplete_expired: 'grey',
   inactive: 'grey',
   timeout: 'grey',
+  not_assessed: 'grey',
+  unknown: 'grey',
+  void: 'grey',
 };
 
 @Component({

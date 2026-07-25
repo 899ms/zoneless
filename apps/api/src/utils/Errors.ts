@@ -119,6 +119,61 @@ export const ERRORS = {
     status: 404,
     type: 'invalid_request_error',
   },
+  PRODUCT_NOT_FOUND: {
+    message: 'Product not found',
+    status: 404,
+    type: 'resource_missing',
+  },
+  PRICE_NOT_FOUND: {
+    message: 'Price not found',
+    status: 404,
+    type: 'resource_missing',
+  },
+  CUSTOMER_NOT_FOUND: {
+    message: 'Customer not found',
+    status: 404,
+    type: 'resource_missing',
+  },
+  CHECKOUT_SESSION_NOT_FOUND: {
+    message: 'Checkout session not found',
+    status: 404,
+    type: 'resource_missing',
+  },
+  PAYMENT_INTENT_NOT_FOUND: {
+    message: 'Payment intent not found',
+    status: 404,
+    type: 'resource_missing',
+  },
+  PAYMENT_LINK_NOT_FOUND: {
+    message: 'Payment link not found',
+    status: 404,
+    type: 'resource_missing',
+  },
+  PAYMENT_LINK_INACTIVE: {
+    message: 'This payment link has been deactivated',
+    status: 400,
+    type: 'invalid_request_error',
+  },
+  CHARGE_NOT_FOUND: {
+    message: 'Charge not found',
+    status: 404,
+    type: 'resource_missing',
+  },
+  INVOICE_ITEM_NOT_FOUND: {
+    message: 'Invoice item not found',
+    status: 404,
+    type: 'resource_missing',
+  },
+  INVOICE_NOT_FOUND: {
+    message: 'Invoice not found',
+    status: 404,
+    type: 'resource_missing',
+  },
+  SUBSCRIPTION_NOT_FOUND: {
+    message: 'Subscription not found',
+    status: 404,
+    type: 'resource_missing',
+  },
 
   // Validation errors
   VALIDATION_ERROR: {

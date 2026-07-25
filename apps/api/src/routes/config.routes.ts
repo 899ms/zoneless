@@ -22,6 +22,7 @@ import { ERRORS } from '../utils/Errors';
 import { VerifyToken } from '../utils/Token';
 import { GetJwtSecret } from '../modules/AppConfig';
 import { SolanaExplorerUrl } from '../modules/chains/Solana';
+import { GetAppConfig } from '../modules/AppConfig';
 
 const router = express.Router();
 
@@ -34,6 +35,8 @@ const apiKeyModule = new ApiKeyModule(db);
  * Helper to build PublicConfig from a platform account.
  */
 function BuildPublicConfig(platformAccount: Account | null): PublicConfig {
+  const { livemode } = GetAppConfig();
+
   if (!platformAccount) {
     return {
       object: 'config',
@@ -41,6 +44,7 @@ function BuildPublicConfig(platformAccount: Account | null): PublicConfig {
       platform_logo_url: '',
       terms_url: '',
       privacy_url: '',
+      livemode,
     };
   }
 
@@ -53,6 +57,7 @@ function BuildPublicConfig(platformAccount: Account | null): PublicConfig {
     platform_logo_url: platformAccount.settings?.branding?.logo || '',
     terms_url: platformAccount.settings?.terms_url || '',
     privacy_url: platformAccount.settings?.privacy_url || '',
+    livemode,
   };
 }
 
@@ -146,13 +151,9 @@ router.get(
   ValidateApiKey,
   RequirePlatform(),
   AsyncHandler(async (req: express.Request, res: express.Response) => {
-    const wallets = await externalWalletModule.GetExternalWalletsByAccount(
+    const platformWallet = await externalWalletModule.GetDefaultWallet(
       req.user.account
     );
-
-    // Get the default wallet (or first one)
-    const platformWallet =
-      wallets.find((w) => w.default_for_currency) || wallets[0];
 
     if (!platformWallet) {
       throw new AppError(

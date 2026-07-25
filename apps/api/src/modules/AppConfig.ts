@@ -22,14 +22,15 @@
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
-import { AppConfig, AppSecrets } from '@zoneless/shared-types';
+import type { AppConfig, AppSecrets } from '@zoneless/shared-types';
 import { DeriveKey } from './Encryption';
 
-// Load environment variables first
-dotenv.config({ path: path.join(__dirname, '../../../../.env') });
+// Load environment variables first.
+// Use cwd so this works for both `tsx` (src) and the webpack bundle (`dist/apps/api`).
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
 // Re-export for convenience
-export { AppConfig, AppSecrets };
+export type { AppConfig, AppSecrets };
 
 // Singleton config instance
 let config: AppConfig | null = null;
@@ -54,17 +55,33 @@ function GenerateSecureHex(bytes: number): string {
 }
 
 /**
+ * Strip a trailing slash so URL joins stay consistent.
+ */
+function NormalizeOrigin(url: string): string {
+  return url.replace(/\/$/, '');
+}
+
+/**
  * Build the base config from environment variables.
  * appSecret will be empty until InitializeAppConfig is called (if not in env).
  */
 function BuildConfigFromEnv(): AppConfig {
+  const dashboardUrl = NormalizeOrigin(
+    process.env.DASHBOARD_URL ||
+      `http://localhost:${process.env.DASHBOARD_PORT || '80'}`
+  );
+  const checkoutUrl = NormalizeOrigin(process.env.CHECKOUT_URL || dashboardUrl);
+  const paymentLinkUrl = NormalizeOrigin(
+    process.env.PAYMENT_LINK_URL || checkoutUrl
+  );
+
   return {
     mongodbUri:
       process.env.MONGODB_URI ||
       'mongodb://localhost:27017/zoneless?replicaSet=rs0',
-    dashboardUrl:
-      process.env.DASHBOARD_URL ||
-      `http://localhost:${process.env.DASHBOARD_PORT || '80'}`,
+    dashboardUrl,
+    checkoutUrl,
+    paymentLinkUrl,
     appSecret: process.env.APP_SECRET || '',
     livemode: process.env.LIVEMODE === 'true',
   };
@@ -74,9 +91,58 @@ function BuildConfigFromEnv(): AppConfig {
  * Check if the instance is in single-tenant mode.
  * When SINGLE_TENANT=true, only one platform can be created.
  * This is useful for self-hosted deployments.
+ * Operator mode implies multi-tenant operation.
  */
 export function IsSingleTenantMode(): boolean {
+  if (IsOperatorMode()) {
+    return false;
+  }
   return process.env.SINGLE_TENANT !== 'false';
+}
+
+/**
+ * Check if the instance is in operator mode (managed hosting).
+ * When OPERATOR_API_KEY is set, public setup is disabled and platform
+ * provisioning happens exclusively via the /v1/operator routes.
+ */
+export function IsOperatorMode(): boolean {
+  return !!process.env.OPERATOR_API_KEY;
+}
+
+/**
+ * Get the operator API key from the environment.
+ * Only meaningful when IsOperatorMode() is true.
+ */
+export function GetOperatorApiKey(): string {
+  return process.env.OPERATOR_API_KEY || '';
+}
+
+/**
+ * Optional secret key that sponsors Solana checkout network fees / rent.
+ * When unset, the buyer pays fees via signAndSend.
+ */
+export function GetCheckoutFeePayerSecretKey(): string | null {
+  const secretKey = process.env.TRANSACTION_FEE_PAYER_KEY;
+  return secretKey && secretKey.length > 0 ? secretKey : null;
+}
+
+/** True when TRANSACTION_FEE_PAYER_KEY is configured. */
+export function IsCheckoutFeeSponsored(): boolean {
+  return !!GetCheckoutFeePayerSecretKey();
+}
+
+/**
+ * Secret key for on-chain subscription plan ownership and payment pulls.
+ * Required for recurring prices.
+ */
+export function RequireSubscriptionOperatorSecretKey(): string {
+  const secretKey = process.env.SUBSCRIPTION_OPERATOR_KEY;
+  if (!secretKey) {
+    throw new Error(
+      'SUBSCRIPTION_OPERATOR_KEY is required for recurring subscription plans'
+    );
+  }
+  return secretKey;
 }
 
 /**

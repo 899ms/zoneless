@@ -35,19 +35,13 @@ export class SetupComponent implements OnInit {
   private readonly storage = inject(StorageService);
   readonly setupService = inject(SetupService);
 
-  seo = {
-    title: 'Setup | Zoneless',
-    description: 'Set up your Zoneless platform',
-    image: '',
-    url: '/setup',
-  };
-
   readonly STEPS = SetupStep;
 
   step: WritableSignal<SetupStep> = signal(SetupStep.WELCOME);
   loading: WritableSignal<boolean> = signal(true);
   submitting: WritableSignal<boolean> = signal(false);
   error: WritableSignal<string> = signal('');
+  operatorMode: WritableSignal<boolean> = signal(false);
 
   // Form data
   platformName: WritableSignal<string> = signal('');
@@ -72,11 +66,18 @@ export class SetupComponent implements OnInit {
   copiedField: WritableSignal<string> = signal('');
 
   async ngOnInit(): Promise<void> {
-    this.meta.SetMeta(this.seo);
+    this.meta.SetMetaTitle('Setup');
 
     try {
       const needsSetup = await this.setupService.CheckSetupStatus();
       const status = this.setupService.status();
+
+      // Operator-managed instances don't offer public setup - show a notice
+      if (status?.operator_mode) {
+        this.operatorMode.set(true);
+        this.loading.set(false);
+        return;
+      }
 
       // Connected accounts should not access setup - redirect to dashboard
       if (status?.is_connected_account) {

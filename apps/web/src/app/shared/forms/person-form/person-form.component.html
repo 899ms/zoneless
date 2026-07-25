@@ -1,4 +1,13 @@
 <div class="person-form">
+  <!-- Test Mode Banner -->
+  @if (mode === 'onboard' && configService.IsTestMode()) {
+  <app-test-mode-banner
+    message="You're using a test account with test data."
+    actionLabel="Use test data"
+    (actionClicked)="FillTestData()"
+  ></app-test-mode-banner>
+  }
+
   <!-- Header (onboard mode only) -->
   @if (mode === 'onboard') {
   <h1>Verify your personal details</h1>
@@ -23,6 +32,8 @@
           class="field-value"
           type="text"
           placeholder="First name"
+          name="given-name"
+          autocomplete="given-name"
           [maxlength]="NAME_MAX_LENGTH"
           [class.field-error]="showErrors && firstNameError()"
         />
@@ -37,6 +48,8 @@
           class="field-value"
           type="text"
           placeholder="Last name"
+          name="family-name"
+          autocomplete="family-name"
           [maxlength]="NAME_MAX_LENGTH"
           [class.field-error]="showErrors && lastNameError()"
         />
@@ -56,6 +69,8 @@
       class="field-value"
       type="email"
       placeholder="email@example.com"
+      name="email"
+      autocomplete="email"
       [class.field-error]="showErrors && emailError()"
     />
     @if (showErrors && emailError()) {
@@ -77,6 +92,8 @@
           class="field-value"
           type="number"
           placeholder="DD"
+          name="bday-day"
+          autocomplete="bday-day"
           min="1"
           max="31"
           [class.field-error]="showErrors && dobError()"
@@ -90,6 +107,8 @@
           class="field-value"
           type="number"
           placeholder="MM"
+          name="bday-month"
+          autocomplete="bday-month"
           min="1"
           max="12"
           [class.field-error]="showErrors && dobError()"
@@ -103,6 +122,8 @@
           class="field-value"
           type="number"
           placeholder="YYYY"
+          name="bday-year"
+          autocomplete="bday-year"
           min="1900"
           [class.field-error]="showErrors && dobError()"
         />
@@ -129,6 +150,8 @@
       <select
         [ngModel]="addressCountry()"
         (ngModelChange)="OnAddressCountryChange($event)"
+        name="country"
+        autocomplete="country"
         [class.field-error]="showErrors && addressError() && !addressCountry()"
       >
         <option selected disabled value="">Select country</option>
@@ -145,6 +168,8 @@
         class="field-value"
         type="text"
         placeholder="Address line 1"
+        name="address-line1"
+        autocomplete="address-line1"
         [class.field-error]="showErrors && addressError() && !addressLine1()"
       />
     </div>
@@ -156,6 +181,8 @@
         class="field-value"
         type="text"
         placeholder="Address line 2 (optional)"
+        name="address-line2"
+        autocomplete="address-line2"
       />
     </div>
 
@@ -166,6 +193,8 @@
         class="field-value"
         type="text"
         placeholder="City"
+        name="address-level2"
+        autocomplete="address-level2"
         [class.field-error]="showErrors && addressError() && !addressCity()"
       />
     </div>
@@ -177,6 +206,8 @@
         class="field-value"
         type="text"
         placeholder="Postal code"
+        name="postal-code"
+        autocomplete="postal-code"
         [class.field-error]="
           showErrors && addressError() && !addressPostalCode()
         "
@@ -196,6 +227,8 @@
         class="phone-country-select"
         [ngModel]="phoneCountryCode()"
         (ngModelChange)="OnPhoneCountryCodeChange($event)"
+        name="tel-country-code"
+        autocomplete="tel-country-code"
       >
         @for (country of ISO_CODES; track country.code) {
         <option [value]="country.code">
@@ -209,6 +242,8 @@
         class="field-value phone-number-input"
         type="tel"
         [placeholder]="GetPhonePlaceholder()"
+        name="tel-national"
+        autocomplete="tel-national"
         [class.field-error]="showErrors && phoneError()"
       />
     </div>

@@ -7,6 +7,7 @@ import {
   OnChanges,
   SimpleChanges,
   ChangeDetectionStrategy,
+  HostListener,
   signal,
   WritableSignal,
   inject,
@@ -16,6 +17,10 @@ import { DatePipe, DecimalPipe, TitleCasePipe } from '@angular/common';
 import { ApiService } from '../../../core';
 import { ListResponse } from '@zoneless/shared-types';
 import { StatusChipComponent } from '../status-chip/status-chip.component';
+import {
+  PopupMenuComponent,
+  PopupMenuAction,
+} from '../popup-menu/popup-menu.component';
 
 export interface PaginatedListColumn {
   /** Column header text */
@@ -29,7 +34,8 @@ export interface PaginatedListColumn {
     | 'currency-with-code'
     | 'date'
     | 'status'
-    | 'number';
+    | 'number'
+    | 'actions';
   /** Whether to bold the cell */
   bolded?: boolean;
   /** Whether to dim the cell text */
@@ -40,6 +46,19 @@ export interface PaginatedListColumn {
   currencyField?: string;
   /** Optional formatter function for computed/custom values */
   formatter?: (item: unknown) => string;
+  /**
+   * Optional 0–1 progress value for a leading ring indicator
+   * (e.g. subscription billing-period progress).
+   */
+  progressGetter?: (item: unknown) => number | null;
+  /** If specified, an image with this field will be displayed*/
+  imageField?: string;
+  /** Fallback icon to display if the image field is not found */
+  placeholderIcon?: string;
+  /** Optional date format for date type (Angular DatePipe format) */
+  dateFormat?: string;
+  /** Optional actions to display in the row */
+  actions?: PopupMenuAction[];
 }
 
 interface ListItem {
@@ -53,7 +72,13 @@ interface ListItem {
   templateUrl: './paginated-list.component.html',
   styleUrls: ['./paginated-list.component.scss'],
   standalone: true,
-  imports: [DatePipe, DecimalPipe, TitleCasePipe, StatusChipComponent],
+  imports: [
+    DatePipe,
+    DecimalPipe,
+    TitleCasePipe,
+    StatusChipComponent,
+    PopupMenuComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class PaginatedListComponent<T extends ListItem>
@@ -73,11 +98,17 @@ export class PaginatedListComponent<T extends ListItem>
   /** Whether pagination controls are shown */
   @Input() paginationEnabled = true;
 
+  /** Show a compact "N results" count when pagination is disabled */
+  @Input() showResultCount = false;
+
   /** Whether to hide column headings */
   @Input() hideColumnHeadings = false;
 
   /** Additional query parameters for filtering */
   @Input() queryParams: Record<string, string> = {};
+
+  /** Which fields to expand */
+  @Input() expand: string[] = [];
 
   /** Emits when a row is clicked */
   @Output() rowClick = new EventEmitter<T>();
@@ -88,6 +119,7 @@ export class PaginatedListComponent<T extends ListItem>
   pageNumber: WritableSignal<number> = signal(0);
   initialLoadComplete: WritableSignal<boolean> = signal(false);
   totalCount: WritableSignal<number> = signal(0);
+  openMenuItemId: WritableSignal<string | null> = signal(null);
 
   // Store last item ID of each page for pagination
   // pageLastItems[N] = last item ID of page N
@@ -123,6 +155,20 @@ export class PaginatedListComponent<T extends ListItem>
     await this.LoadItems();
   }
 
+  /**
+   * Reload the list from the server. Call this after a mutation
+   * (archive, delete, create, etc.) to reflect the new state.
+   * Preserves the current page when possible.
+   */
+  async Reload(): Promise<void> {
+    if (this.pageNumber() === 0) {
+      await this.LoadItems();
+      return;
+    }
+    const cursor = this.pageLastItems[this.pageNumber() - 1];
+    await this.LoadItems(cursor);
+  }
+
   private async LoadItems(startingAfter?: string): Promise<void> {
     if (!this.endpoint) return;
 
@@ -138,6 +184,15 @@ export class PaginatedListComponent<T extends ListItem>
         if (value) {
           url += `&${key}=${value}`;
         }
+      }
+
+      // Add expand info
+      if (this.expand.length > 0) {
+        url += `&expand[]=`;
+        for (const expand of this.expand) {
+          url += `data.${expand},`;
+        }
+        url = url.slice(0, -1);
       }
 
       const response = await this.api.Call<ListResponse<T>>('GET', url);
@@ -191,20 +246,36 @@ export class PaginatedListComponent<T extends ListItem>
   }
 
   OnRowClick(item: T): void {
+    if (this.openMenuItemId() !== null) {
+      this.openMenuItemId.set(null);
+      return;
+    }
     this.rowClick.emit(item);
   }
 
   GetItemValue(item: T, field: string): unknown {
+    if (field.includes('.')) {
+      for (const part of field.split('.')) {
+        item = item[part] as T;
+      }
+      return item;
+    }
+    if (field.includes('[')) {
+      const [key, index] = field.split('[');
+      const indexNumber = parseInt(index.replace(']', ''));
+      const value = item[key] as unknown[];
+      return value[indexNumber] ?? '';
+    }
     return item[field];
   }
 
   GetItemNumber(item: T, field: string): number {
-    const value = item[field];
+    const value = this.GetItemValue(item, field);
     return typeof value === 'number' ? value / 100 : 0;
   }
 
   GetItemDate(item: T, field: string): number {
-    const value = item[field];
+    const value = this.GetItemValue(item, field);
     // API returns Unix timestamps in seconds, DatePipe expects milliseconds
     return typeof value === 'number' ? value * 1000 : 0;
   }
@@ -214,12 +285,38 @@ export class PaginatedListComponent<T extends ListItem>
     if (column.formatter) {
       return column.formatter(item);
     }
-    const value = item[column.field];
+    const value = this.GetItemValue(item, column.field);
     return String(value ?? '');
   }
 
+  GetItemImage(item: T, field: string): string {
+    //An array field, e.g. "images[0]"
+    if (field.includes('[')) {
+      const [key, index] = field.split('[');
+      const indexNumber = parseInt(index.replace(']', ''));
+      const value = item[key] as unknown[];
+      return String(value[indexNumber] ?? '');
+    }
+    //A single field, e.g. "imageUrl"
+    const value = this.GetItemValue(item, field);
+    return String(value ?? '');
+  }
+
+  GetColumnProgress(item: T, column: PaginatedListColumn): number | null {
+    if (!column.progressGetter) return null;
+    const value = column.progressGetter(item);
+    if (value == null || Number.isNaN(value)) return null;
+    return Math.min(1, Math.max(0, value));
+  }
+
+  /** SVG stroke-dasharray for a ring with radius 7. */
+  GetProgressDasharray(progress: number): string {
+    const circumference = 2 * Math.PI * 7;
+    return `${progress * circumference} ${circumference}`;
+  }
+
   GetItemCurrency(item: T, field: string): string {
-    const value = item[field];
+    const value = this.GetItemValue(item, field);
     return String(value ?? 'usdc').toUpperCase();
   }
 

@@ -12,6 +12,7 @@ import {
   Cluster,
   PublicKey,
   Transaction,
+  TransactionInstruction,
   ParsedTransactionWithMeta,
   ConfirmedSignatureInfo,
 } from '@solana/web3.js';
@@ -19,9 +20,84 @@ import bs58 from 'bs58';
 import {
   getAssociatedTokenAddress,
   createTransferInstruction,
+  createTransferCheckedInstruction,
   createAssociatedTokenAccountIdempotentInstruction,
   TOKEN_PROGRAM_ID,
 } from '@solana/spl-token';
+import { createHash } from 'crypto';
+import {
+  address,
+  AccountRole,
+  createClient,
+  createKeyPairSignerFromBytes,
+  createNoopSigner,
+} from '@solana/kit';
+import type { Instruction } from '@solana/instructions';
+import { solanaRpc } from '@solana/kit-plugin-rpc';
+import { signer } from '@solana/kit-plugin-signer';
+import {
+  findAssociatedTokenPda,
+  TOKEN_PROGRAM_ADDRESS,
+} from '@solana-program/token';
+import {
+  findPlanPda,
+  findSubscriptionDelegationPda,
+  findSubscriptionAuthorityPda,
+  fetchMaybePlan,
+  fetchMaybeSubscriptionAuthority,
+  fetchMaybeSubscriptionDelegation,
+  getInitSubscriptionAuthorityOverlayInstructionAsync,
+  getSubscribeOverlayInstructionAsync,
+  subscriptionsProgram,
+} from '@solana/subscriptions';
+import {
+  GetCheckoutFeePayerSecretKey,
+  RequireSubscriptionOperatorSecretKey,
+} from '../AppConfig';
+
+/**
+ * Derive a deterministic on-chain planId (u64) from an off-chain price id string.
+ * Same price id always maps to the same plan PDA for a given merchant.
+ */
+export function PlanIdFromPriceId(priceId: string): bigint {
+  const hash = createHash('sha256').update(priceId).digest();
+  return hash.readBigUInt64BE(0);
+}
+
+/** SPL Memo program, used to bind a payment transaction to a checkout session. */
+const MEMO_PROGRAM_ID = new PublicKey(
+  'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'
+);
+
+/** Result of verifying a checkout payment transaction on-chain */
+export interface CheckoutPaymentVerification {
+  verified: boolean;
+  /** Total USDC (in cents) transferred to the merchant in this transaction */
+  amount_cents: number;
+  /** The payer's wallet address (transfer authority) */
+  payer_address: string | null;
+  /** Reason verification failed, if it did */
+  failure_reason?: string;
+}
+
+/** Result of verifying an on-chain subscribe transaction */
+export interface CheckoutSubscribeVerification {
+  verified: boolean;
+  /** Subscriber wallet that signed the subscribe transaction */
+  subscriber_address: string | null;
+  /** Subscription delegation PDA created by the subscribe instruction */
+  subscription_delegation_pda: string | null;
+  /** Reason verification failed, if it did */
+  failure_reason?: string;
+}
+
+/** Shared shape returned by unsigned transaction builders */
+export interface UnsignedSolanaTransaction {
+  unsigned_transaction: string;
+  estimated_fee_lamports: number;
+  blockhash: string;
+  last_valid_block_height: number;
+}
 
 /** Represents a single recipient in a batch USDC transfer */
 export interface TransferRecipient {
@@ -45,8 +121,11 @@ export interface IncomingDeposit {
   slot: number;
 }
 
-// Rate limiting configuration - public Solana RPC has strict limits
-const RPC_DELAY_MS = 2000; // 2 second delay between RPC calls to avoid rate limits
+// Rate limiting for bulk deposit scanning (public RPC is strict).
+const RPC_DELAY_MS = 2000;
+// Confirmation polling should be snappy — not the deposit-scan delay.
+const CONFIRM_POLL_MS = 400;
+const CONFIRM_MAX_ATTEMPTS = 75; // ~30s at 400ms
 const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY_MS = 2000;
 
@@ -283,13 +362,9 @@ export class Solana {
    * The transaction must be fully signed before calling this method.
    *
    * @param signedTransaction - The signed transaction as a base64-encoded string
-   * @param options - Optional blockhash info from the build step to avoid a redundant RPC call
    * @returns Transaction result with signature and status
    */
-  async BroadcastSignedTransaction(
-    signedTransaction: string,
-    options?: { blockhash?: string; lastValidBlockHeight?: number }
-  ): Promise<{
+  async BroadcastSignedTransaction(signedTransaction: string): Promise<{
     signature: string;
     status: 'paid' | 'failed';
     viewer_url: string;
@@ -300,38 +375,22 @@ export class Solana {
 
       const signature = await this.WithRetry(() =>
         this.connection.sendRawTransaction(transactionBuffer, {
-          skipPreflight: true,
+          skipPreflight: false,
+          preflightCommitment: 'confirmed',
           maxRetries: 3,
         })
       );
 
-      const transaction = Transaction.from(transactionBuffer);
-      const blockhash = options?.blockhash || transaction.recentBlockhash!;
-
-      // Reuse lastValidBlockHeight from build step when available
-      let lastValidBlockHeight = options?.lastValidBlockHeight;
-      if (!lastValidBlockHeight) {
-        const latest = await this.WithRetry(() =>
-          this.connection.getLatestBlockhash('confirmed')
-        );
-        lastValidBlockHeight = latest.lastValidBlockHeight;
-      }
-
-      const confirmation = await this.WithRetry(() =>
-        this.connection.confirmTransaction(
-          { signature, blockhash, lastValidBlockHeight: lastValidBlockHeight! },
-          'confirmed'
-        )
-      );
-
-      if (confirmation.value.err) {
+      // Poll via HTTP — confirmTransaction's websocket path hangs on many RPCs.
+      const confirmed = await this.WaitForSignatureConfirmation(signature);
+      if (!confirmed.ok) {
         return {
           signature,
           status: 'failed',
           viewer_url: this.ExplorerUrl('tx', signature),
-          failure_message: `Transaction failed: ${JSON.stringify(
-            confirmation.value.err
-          )}`,
+          failure_message:
+            confirmed.failure_message ||
+            'Transaction was submitted but failed to confirm',
         };
       }
 
@@ -344,6 +403,21 @@ export class Solana {
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';
 
+      // sendRawTransaction can throw if the tx already landed (duplicate).
+      const maybeSignature = this.ExtractSignatureFromSendError(error);
+      if (maybeSignature) {
+        const confirmed = await this.WaitForSignatureConfirmation(
+          maybeSignature
+        );
+        if (confirmed.ok) {
+          return {
+            signature: maybeSignature,
+            status: 'paid',
+            viewer_url: this.ExplorerUrl('tx', maybeSignature),
+          };
+        }
+      }
+
       return {
         signature: '',
         status: 'failed',
@@ -351,6 +425,53 @@ export class Solana {
         failure_message: `Broadcast failed: ${errorMessage}`,
       };
     }
+  }
+
+  private async WaitForSignatureConfirmation(
+    signature: string
+  ): Promise<{ ok: boolean; failure_message?: string }> {
+    for (let attempt = 0; attempt < CONFIRM_MAX_ATTEMPTS; attempt++) {
+      const statuses = await this.WithRetry(() =>
+        this.connection.getSignatureStatuses([signature], {
+          searchTransactionHistory: true,
+        })
+      );
+      const status = statuses?.value?.[0];
+      if (status?.err) {
+        return {
+          ok: false,
+          failure_message: `Transaction failed: ${JSON.stringify(status.err)}`,
+        };
+      }
+      if (
+        status?.confirmationStatus === 'confirmed' ||
+        status?.confirmationStatus === 'finalized'
+      ) {
+        return { ok: true };
+      }
+      await Sleep(CONFIRM_POLL_MS);
+    }
+    return {
+      ok: false,
+      failure_message: 'Transaction confirmation timed out',
+    };
+  }
+
+  private ExtractSignatureFromSendError(error: unknown): string | null {
+    if (!error || typeof error !== 'object') return null;
+    const withSignature = error as { signature?: string };
+    if (
+      typeof withSignature.signature === 'string' &&
+      withSignature.signature.length > 0
+    ) {
+      return withSignature.signature;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    // web3.js often embeds: "Transaction ... already been processed: <sig>"
+    const match = message.match(
+      /already (?:been )?processed[:\s]+([1-9A-HJ-NP-Za-km-z]{64,100})/i
+    );
+    return match?.[1] ?? null;
   }
 
   /**
@@ -422,7 +543,11 @@ export class Solana {
     signature: string
   ): Promise<ParsedTransactionWithMeta | null> {
     return this.WithRetry(async () => {
+      // Match WaitForSignatureConfirmation: default Connection commitment is
+      // `finalized`, which lags `confirmed` and caused subscribe confirm to
+      // time out on the first attempt ("Transaction not found on-chain").
       return this.connection.getParsedTransaction(signature, {
+        commitment: 'confirmed',
         maxSupportedTransactionVersion: 0,
       });
     });
@@ -576,5 +701,861 @@ export class Solana {
     }
 
     return null;
+  }
+
+  /**
+   * Build an unsigned one-time USDC payment transaction for a checkout session.
+   * Transfers the session total from the payer to the merchant wallet and
+   * attaches an SPL Memo with the checkout session ID so the payment can be
+   * unambiguously matched to the session during verification.
+   *
+   * When `feeSponsored` is true, TRANSACTION_FEE_PAYER_KEY pays network fees
+   * and ATA rent; the customer only co-signs the transfer.
+   */
+  async BuildCheckoutPaymentTransaction(
+    payerPublicKey: string,
+    merchantWalletAddress: string,
+    amountInCents: number,
+    checkoutSessionId: string,
+    options?: { feeSponsored?: boolean }
+  ): Promise<UnsignedSolanaTransaction> {
+    if (!payerPublicKey) {
+      throw new Error('Payer public key is required');
+    }
+    if (!merchantWalletAddress) {
+      throw new Error('Merchant wallet address is required');
+    }
+    if (!Number.isInteger(amountInCents) || amountInCents <= 0) {
+      throw new Error('Amount must be a positive integer number of cents');
+    }
+    if (!checkoutSessionId) {
+      throw new Error('Checkout session ID is required');
+    }
+
+    const feeSponsored = !!options?.feeSponsored;
+    const payer = new PublicKey(payerPublicKey);
+    const merchant = new PublicKey(merchantWalletAddress);
+    const usdcMint = new PublicKey(this.GetUSDCMintAddress());
+    const rentPayer = feeSponsored
+      ? Keypair.fromSecretKey(
+          bs58.decode(this.RequireCheckoutFeePayerSecretKey())
+        ).publicKey
+      : payer;
+
+    const payerTokenAccount = await getAssociatedTokenAddress(usdcMint, payer);
+    const merchantTokenAccount = await getAssociatedTokenAddress(
+      usdcMint,
+      merchant
+    );
+
+    // Convert cents to USDC atomic units (6 decimals => 1 cent = 10,000 units)
+    const amountInSmallestUnit = amountInCents * 10_000;
+
+    const transaction = new Transaction();
+
+    // Ensure the merchant's USDC token account exists
+    transaction.add(
+      createAssociatedTokenAccountIdempotentInstruction(
+        rentPayer,
+        merchantTokenAccount,
+        merchant,
+        usdcMint
+      )
+    );
+
+    transaction.add(
+      createTransferCheckedInstruction(
+        payerTokenAccount,
+        usdcMint,
+        merchantTokenAccount,
+        payer,
+        amountInSmallestUnit,
+        6
+      )
+    );
+
+    // Memo binds this transaction to the checkout session
+    transaction.add(
+      new TransactionInstruction({
+        programId: MEMO_PROGRAM_ID,
+        keys: [],
+        data: Buffer.from(checkoutSessionId, 'utf8'),
+      })
+    );
+
+    return this.FinalizeUnsignedTransaction(transaction, rentPayer, {
+      feeSponsored: !!options?.feeSponsored,
+    });
+  }
+
+  /**
+   * Build an init-only SubscriptionAuthority tx when the subscriber has none
+   * for the USDC mint. Returns null when the authority already exists.
+   *
+   * Must land in its own transaction before subscribe: the program stores
+   * `init_id = Clock::slot` at execution, and bundling with subscribe is
+   * unreliable across program versions / wallet simulation.
+   */
+  async BuildInitSubscriptionAuthorityTransaction(
+    subscriberWallet: string,
+    options?: { feeSponsored?: boolean }
+  ): Promise<UnsignedSolanaTransaction | null> {
+    if (!subscriberWallet) {
+      throw new Error('Subscriber wallet is required');
+    }
+
+    const feeSponsored = !!options?.feeSponsored;
+    const usdcMintAddress = this.GetUSDCMintAddress();
+    const tokenMint = address(usdcMintAddress);
+    const subscriberAddress = address(subscriberWallet);
+    const subscriberSigner = createNoopSigner(subscriberAddress);
+
+    const rentPayerPubkey = feeSponsored
+      ? Keypair.fromSecretKey(
+          bs58.decode(this.RequireCheckoutFeePayerSecretKey())
+        ).publicKey
+      : new PublicKey(subscriberWallet);
+    const rentPayerSigner = createNoopSigner(
+      address(rentPayerPubkey.toBase58())
+    );
+
+    const [authorityPda] = await findSubscriptionAuthorityPda({
+      user: subscriberAddress,
+      tokenMint,
+    });
+    const authority = await fetchMaybeSubscriptionAuthority(
+      this.CreateSubscriptionsRpc(subscriberSigner).rpc,
+      authorityPda
+    );
+    if (authority.exists) {
+      return null;
+    }
+
+    const [subscriberAta] = await findAssociatedTokenPda({
+      mint: tokenMint,
+      owner: subscriberAddress,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+    });
+
+    const initIx = await getInitSubscriptionAuthorityOverlayInstructionAsync({
+      owner: subscriberSigner,
+      payer: rentPayerSigner,
+      tokenMint,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      userAta: subscriberAta,
+    });
+
+    const transaction = new Transaction();
+    transaction.add(
+      createAssociatedTokenAccountIdempotentInstruction(
+        rentPayerPubkey,
+        new PublicKey(subscriberAta),
+        new PublicKey(subscriberWallet),
+        new PublicKey(usdcMintAddress)
+      )
+    );
+    transaction.add(this.ToWeb3Instruction(initIx));
+
+    return this.FinalizeUnsignedTransaction(transaction, rentPayerPubkey, {
+      feeSponsored,
+    });
+  }
+
+  /**
+   * Build a subscribe-only transaction. Requires an existing
+   * SubscriptionAuthority; call BuildInitSubscriptionAuthorityTransaction
+   * first for new wallets.
+   *
+   * Plan owner is always SUBSCRIPTION_OPERATOR_KEY. Fee/rent payer is
+   * TRANSACTION_FEE_PAYER_KEY when sponsored, otherwise the subscriber.
+   */
+  async BuildSubscribeTransaction(
+    subscriberWallet: string,
+    priceId: string,
+    planPda: string,
+    options?: { feeSponsored?: boolean }
+  ): Promise<UnsignedSolanaTransaction> {
+    if (!subscriberWallet) {
+      throw new Error('Subscriber wallet is required');
+    }
+    if (!priceId) {
+      throw new Error('Price ID is required');
+    }
+    if (!planPda) {
+      throw new Error('Plan PDA is required');
+    }
+
+    const feeSponsored = !!options?.feeSponsored;
+    const planOwner = this.GetPlanOwnerPublicKey();
+    const planId = PlanIdFromPriceId(priceId);
+    const usdcMintAddress = this.GetUSDCMintAddress();
+    const tokenMint = address(usdcMintAddress);
+    const subscriberAddress = address(subscriberWallet);
+    const subscriberSigner = createNoopSigner(subscriberAddress);
+
+    const rentPayerPubkey = feeSponsored
+      ? Keypair.fromSecretKey(
+          bs58.decode(this.RequireCheckoutFeePayerSecretKey())
+        ).publicKey
+      : new PublicKey(subscriberWallet);
+    const rentPayerSigner = createNoopSigner(
+      address(rentPayerPubkey.toBase58())
+    );
+
+    const [expectedPlanPda] = await findPlanPda({
+      owner: address(planOwner),
+      planId,
+    });
+    if (expectedPlanPda !== planPda) {
+      throw new Error(
+        `Plan PDA mismatch for price ${priceId}: expected ${expectedPlanPda}, got ${planPda}`
+      );
+    }
+
+    const rpcClient = this.CreateSubscriptionsRpc(subscriberSigner);
+
+    const planAccount = await fetchMaybePlan(rpcClient.rpc, address(planPda));
+    if (!planAccount.exists) {
+      throw new Error(
+        'On-chain subscription plan was not found. Recreate the recurring price and try again.'
+      );
+    }
+
+    const [subscriptionPda] = await findSubscriptionDelegationPda({
+      planPda: address(planPda),
+      subscriber: subscriberAddress,
+    });
+    const existingSubscription = await fetchMaybeSubscriptionDelegation(
+      rpcClient.rpc,
+      subscriptionPda
+    );
+    if (existingSubscription.exists) {
+      throw new Error(
+        'This wallet is already subscribed to this plan on-chain.'
+      );
+    }
+
+    const [authorityPda] = await findSubscriptionAuthorityPda({
+      user: subscriberAddress,
+      tokenMint,
+    });
+    const authority = await fetchMaybeSubscriptionAuthority(
+      rpcClient.rpc,
+      authorityPda
+    );
+    if (!authority.exists) {
+      throw new Error(
+        'Subscription authority is not initialized for this wallet. Init it first.'
+      );
+    }
+
+    const planData = planAccount.data.data;
+    const subscribeIx = await getSubscribeOverlayInstructionAsync({
+      merchant: address(planOwner),
+      planId,
+      tokenMint,
+      payer: rentPayerSigner,
+      subscriber: subscriberSigner,
+      expectedAmount: planData.terms.amount,
+      expectedPeriodHours: planData.terms.periodHours,
+      expectedCreatedAt: planData.terms.createdAt,
+      expectedSubscriptionAuthorityInitId: authority.data.initId,
+    });
+
+    const transaction = new Transaction();
+    transaction.add(this.ToWeb3Instruction(subscribeIx));
+
+    return this.FinalizeUnsignedTransaction(transaction, rentPayerPubkey, {
+      feeSponsored,
+    });
+  }
+
+  /**
+   * Poll until the subscriber's SubscriptionAuthority PDA exists (after init).
+   */
+  async WaitForSubscriptionAuthority(
+    subscriberWallet: string,
+    maxAttempts = CONFIRM_MAX_ATTEMPTS
+  ): Promise<void> {
+    const tokenMint = address(this.GetUSDCMintAddress());
+    const subscriberAddress = address(subscriberWallet);
+    const [authorityPda] = await findSubscriptionAuthorityPda({
+      user: subscriberAddress,
+      tokenMint,
+    });
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const info = await this.WithRetry(() =>
+        this.connection.getAccountInfo(new PublicKey(authorityPda), 'confirmed')
+      );
+      if (info) return;
+      await Sleep(CONFIRM_POLL_MS);
+    }
+    throw new Error(
+      'Subscription authority was not found on-chain after init. Please try again.'
+    );
+  }
+
+  private CreateSubscriptionsRpc(
+    subscriberSigner: ReturnType<typeof createNoopSigner>
+  ) {
+    return createClient()
+      .use(signer(subscriberSigner))
+      .use(
+        solanaRpc({
+          rpcUrl: process.env.SOLANA_RPC_URL || clusterApiUrl(this.network),
+        })
+      )
+      .use(subscriptionsProgram());
+  }
+
+  /**
+   * After the customer co-signs a fee-sponsored checkout tx, add the
+   * TRANSACTION_FEE_PAYER signature and broadcast on our RPC.
+   */
+  async CosignAndBroadcastCheckoutTransaction(
+    signedByCustomerBase64: string
+  ): Promise<{ signature: string }> {
+    const transaction = Transaction.from(
+      Buffer.from(signedByCustomerBase64, 'base64')
+    );
+    const feePayerKeypair = Keypair.fromSecretKey(
+      bs58.decode(this.RequireCheckoutFeePayerSecretKey())
+    );
+    transaction.partialSign(feePayerKeypair);
+
+    const broadcast = await this.BroadcastSignedTransaction(
+      transaction.serialize().toString('base64')
+    );
+    if (broadcast.status === 'failed') {
+      throw new Error(
+        broadcast.failure_message || 'Failed to broadcast checkout transaction'
+      );
+    }
+    return { signature: broadcast.signature };
+  }
+
+  /** @deprecated Use CosignAndBroadcastCheckoutTransaction */
+  async CosignAndBroadcastSubscribeTransaction(
+    signedBySubscriberBase64: string
+  ): Promise<{ signature: string }> {
+    return this.CosignAndBroadcastCheckoutTransaction(signedBySubscriberBase64);
+  }
+
+  /**
+   * Return the subscription delegation PDA when this wallet is already
+   * subscribed to the plan, otherwise null.
+   */
+  async FindExistingSubscriptionDelegation(
+    planPda: string,
+    subscriberWallet: string
+  ): Promise<string | null> {
+    const [subscriptionPda] = await findSubscriptionDelegationPda({
+      planPda: address(planPda),
+      subscriber: address(subscriberWallet),
+    });
+    const account = await this.WithRetry(() =>
+      this.connection.getAccountInfo(
+        new PublicKey(subscriptionPda),
+        'confirmed'
+      )
+    );
+    return account ? subscriptionPda : null;
+  }
+
+  /**
+   * Verify that a broadcast transaction successfully created a subscription
+   * delegation PDA for the given plan and subscriber.
+   */
+  async VerifySubscribeTransaction(
+    signature: string,
+    expected: {
+      planPda: string;
+      subscriberWallet: string;
+    }
+  ): Promise<CheckoutSubscribeVerification> {
+    let tx: ParsedTransactionWithMeta | null = null;
+    for (let attempt = 0; attempt < CONFIRM_MAX_ATTEMPTS; attempt++) {
+      tx = await this.GetParsedTransaction(signature);
+      if (tx) break;
+      await Sleep(CONFIRM_POLL_MS);
+    }
+
+    if (!tx || !tx.meta) {
+      return {
+        verified: false,
+        subscriber_address: null,
+        subscription_delegation_pda: null,
+        failure_reason:
+          'Transaction not found on-chain (may not be confirmed yet)',
+      };
+    }
+
+    if (tx.meta.err) {
+      return {
+        verified: false,
+        subscriber_address: null,
+        subscription_delegation_pda: null,
+        failure_reason: `Transaction failed on-chain: ${JSON.stringify(
+          tx.meta.err
+        )}`,
+      };
+    }
+
+    const [subscriptionPda] = await findSubscriptionDelegationPda({
+      planPda: address(expected.planPda),
+      subscriber: address(expected.subscriberWallet),
+    });
+
+    const subscriptionAccount = await this.WithRetry(() =>
+      this.connection.getAccountInfo(
+        new PublicKey(subscriptionPda),
+        'confirmed'
+      )
+    );
+
+    if (!subscriptionAccount) {
+      return {
+        verified: false,
+        subscriber_address: expected.subscriberWallet,
+        subscription_delegation_pda: null,
+        failure_reason:
+          'Subscription account was not created for this subscriber and plan',
+      };
+    }
+
+    const feePayer = tx.transaction.message.accountKeys[0];
+    const feePayerAddress =
+      typeof feePayer === 'string'
+        ? feePayer
+        : feePayer?.pubkey?.toBase58?.() ?? null;
+
+    // Fee payer may be the platform sponsor; subscriber must still appear as a
+    // signer on the transaction (account key with signer flag).
+    const accountKeys = tx.transaction.message.accountKeys;
+    const subscriberSigned = accountKeys.some((key) => {
+      const address =
+        typeof key === 'string' ? key : key?.pubkey?.toBase58?.() ?? '';
+      if (address !== expected.subscriberWallet) return false;
+      if (typeof key === 'string') return true;
+      return key.signer === true || key.signer === undefined;
+    });
+
+    if (!subscriberSigned) {
+      return {
+        verified: false,
+        subscriber_address: feePayerAddress,
+        subscription_delegation_pda: subscriptionPda,
+        failure_reason:
+          'Subscribe transaction was not signed by the expected wallet',
+      };
+    }
+
+    return {
+      verified: true,
+      subscriber_address: expected.subscriberWallet,
+      subscription_delegation_pda: subscriptionPda,
+    };
+  }
+
+  /**
+   * Collect a subscription period payment. Signed by the plan owner
+   * (`SUBSCRIPTION_OPERATOR_KEY`). Funds go to the plan's on-chain destination
+   * allowlist (not an arbitrary merchant wallet — mismatched receivers fail
+   * on-chain).
+   */
+  async CollectSubscriptionPayment(params: {
+    subscriberWallet: string;
+    planPda: string;
+    subscriptionPda: string;
+    amountCents: number;
+    /** Optional; must match a plan destination if the plan has an allowlist. */
+    destinationWallet?: string;
+  }): Promise<{ signature: string; alreadyCollected: boolean }> {
+    const {
+      subscriberWallet,
+      planPda,
+      subscriptionPda,
+      amountCents,
+      destinationWallet,
+    } = params;
+
+    if (!Number.isInteger(amountCents) || amountCents <= 0) {
+      throw new Error('Amount must be a positive integer number of cents');
+    }
+
+    // Prefer transaction fee payer for ATA rent when configured; else operator.
+    const ataRentPayerSecret =
+      GetCheckoutFeePayerSecretKey() || RequireSubscriptionOperatorSecretKey();
+    const feePayerKeypair = Keypair.fromSecretKey(
+      bs58.decode(ataRentPayerSecret)
+    );
+    const merchantSigner = await this.GetPlanOwnerSigner();
+    const tokenMint = address(this.GetUSDCMintAddress());
+    const usdcMint = new PublicKey(this.GetUSDCMintAddress());
+
+    const rpcClient = createClient()
+      .use(signer(merchantSigner))
+      .use(
+        solanaRpc({
+          rpcUrl: process.env.SOLANA_RPC_URL || clusterApiUrl(this.network),
+        })
+      )
+      .use(subscriptionsProgram());
+
+    const planAccount = await fetchMaybePlan(rpcClient.rpc, address(planPda));
+    if (!planAccount.exists) {
+      throw new Error(`Subscription plan not found on-chain: ${planPda}`);
+    }
+
+    const SYSTEM_PROGRAM = '11111111111111111111111111111111';
+    const allowlisted = planAccount.data.data.destinations
+      .map((dest) => String(dest))
+      .filter((dest) => dest && dest !== SYSTEM_PROGRAM);
+    // Plans bake the receiving wallet in at create time — collect must use it.
+    const resolvedDestination = allowlisted[0] || destinationWallet;
+
+    if (!resolvedDestination) {
+      throw new Error(
+        'Subscription plan has no destination wallet configured on-chain'
+      );
+    }
+
+    if (
+      destinationWallet &&
+      allowlisted.length > 0 &&
+      !allowlisted.includes(destinationWallet)
+    ) {
+      console.warn(
+        `[Solana] Collect using plan destination ${resolvedDestination} (merchant wallet ${destinationWallet} is not in the plan allowlist)`
+      );
+    }
+
+    const destinationPubkey = new PublicKey(resolvedDestination);
+    const receiverAta = await getAssociatedTokenAddress(
+      usdcMint,
+      destinationPubkey
+    );
+
+    // Only create+confirm the destination ATA when missing — otherwise every
+    // collect burns a full confirmation wait on a no-op idempotent create.
+    const existingAta = await this.WithRetry(() =>
+      this.connection.getAccountInfo(receiverAta, 'confirmed')
+    );
+    if (!existingAta) {
+      const createAtaTx = new Transaction().add(
+        createAssociatedTokenAccountIdempotentInstruction(
+          feePayerKeypair.publicKey,
+          receiverAta,
+          destinationPubkey,
+          usdcMint
+        )
+      );
+      const { blockhash } = await this.WithRetry(() =>
+        this.connection.getLatestBlockhash('confirmed')
+      );
+      createAtaTx.recentBlockhash = blockhash;
+      createAtaTx.feePayer = feePayerKeypair.publicKey;
+      createAtaTx.sign(feePayerKeypair);
+      const createAtaSignature = await this.WithRetry(() =>
+        this.connection.sendRawTransaction(createAtaTx.serialize(), {
+          skipPreflight: false,
+          preflightCommitment: 'confirmed',
+        })
+      );
+      const createAtaConfirmed = await this.WaitForSignatureConfirmation(
+        createAtaSignature
+      );
+      if (!createAtaConfirmed.ok) {
+        throw new Error(
+          createAtaConfirmed.failure_message ||
+            `Failed to confirm destination ATA creation (${createAtaSignature})`
+        );
+      }
+    }
+
+    const amount = BigInt(amountCents * 10_000);
+
+    // Do NOT short-circuit on amountPulledInPeriod alone. That counter is only
+    // reset when transferSubscription runs (after the program advances
+    // currentPeriodStartTs). Reading a stale pull count after the period has
+    // rolled would permanently block renewals with a false "already collected".
+    // Always attempt the transfer; #400 means we are still inside the period.
+
+    try {
+      const result = await rpcClient.subscriptions.instructions
+        .transferSubscription({
+          caller: merchantSigner,
+          delegator: address(subscriberWallet),
+          tokenMint,
+          subscriptionPda: address(subscriptionPda),
+          planPda: address(planPda),
+          amount,
+          receiverAta: address(receiverAta.toBase58()),
+          tokenProgram: TOKEN_PROGRAM_ADDRESS,
+        })
+        .sendTransaction();
+
+      return {
+        signature: result.context.signature,
+        alreadyCollected: false,
+      };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/#400|exceeds period limit/i.test(message)) {
+        return { signature: 'already_collected', alreadyCollected: true };
+      }
+      throw new Error(
+        `Subscription collect failed (destination ${resolvedDestination}, ATA ${receiverAta.toBase58()}): ${message}`
+      );
+    }
+  }
+
+  /**
+   * Public key of the wallet that owns on-chain subscription plans
+   * (SUBSCRIPTION_OPERATOR_KEY). This is the `merchant` argument to `subscribe`
+   * and the authorized puller.
+   */
+  GetPlanOwnerPublicKey(): string {
+    const secretKey = RequireSubscriptionOperatorSecretKey();
+    return Keypair.fromSecretKey(bs58.decode(secretKey)).publicKey.toBase58();
+  }
+
+  private async GetPlanOwnerSigner() {
+    return createKeyPairSignerFromBytes(
+      bs58.decode(RequireSubscriptionOperatorSecretKey())
+    );
+  }
+
+  private RequireCheckoutFeePayerSecretKey(): string {
+    const secretKey = GetCheckoutFeePayerSecretKey();
+    if (!secretKey) {
+      throw new Error(
+        'TRANSACTION_FEE_PAYER_KEY is required for fee sponsorship'
+      );
+    }
+    return secretKey;
+  }
+
+  private ToWeb3Instruction(instruction: Instruction): TransactionInstruction {
+    return new TransactionInstruction({
+      programId: new PublicKey(instruction.programAddress),
+      keys: (instruction.accounts ?? []).map((account) => ({
+        pubkey: new PublicKey(account.address),
+        isSigner:
+          account.role === AccountRole.READONLY_SIGNER ||
+          account.role === AccountRole.WRITABLE_SIGNER,
+        isWritable:
+          account.role === AccountRole.WRITABLE ||
+          account.role === AccountRole.WRITABLE_SIGNER,
+      })),
+      data: Buffer.from(instruction.data ?? new Uint8Array()),
+    });
+  }
+
+  private async FinalizeUnsignedTransaction(
+    transaction: Transaction,
+    feePayer: PublicKey,
+    options?: { feeSponsored?: boolean }
+  ): Promise<UnsignedSolanaTransaction> {
+    const { blockhash, lastValidBlockHeight } = await this.WithRetry(() =>
+      this.connection.getLatestBlockhash('confirmed')
+    );
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = feePayer;
+
+    // Pre-sign with the fee payer so wallet simulation sees a funded payer
+    // and does not warn about the subscriber's empty SOL balance.
+    if (options?.feeSponsored) {
+      const feePayerKeypair = Keypair.fromSecretKey(
+        bs58.decode(this.RequireCheckoutFeePayerSecretKey())
+      );
+      transaction.partialSign(feePayerKeypair);
+    }
+
+    const fee = await this.WithRetry(() =>
+      this.connection.getFeeForMessage(
+        transaction.compileMessage(),
+        'confirmed'
+      )
+    );
+
+    return {
+      unsigned_transaction: transaction
+        .serialize({ requireAllSignatures: false })
+        .toString('base64'),
+      estimated_fee_lamports: fee.value || 0,
+      blockhash,
+      last_valid_block_height: lastValidBlockHeight,
+    };
+  }
+
+  /**
+   * Verify that a broadcast transaction is a valid payment for a checkout
+   * session: it succeeded, transferred at least the expected USDC amount to
+   * the merchant's token account, and carries the session ID memo.
+   *
+   * Polls until the transaction is visible at 'confirmed' commitment or a
+   * timeout is reached (the customer's wallet broadcasts the transaction, so
+   * it may not be queryable immediately).
+   *
+   * @param signature - The transaction signature to verify
+   * @param expected - Expected merchant wallet, amount, and session ID
+   * @returns Verification result with the payer address on success
+   */
+  async VerifyCheckoutPayment(
+    signature: string,
+    expected: {
+      merchantWalletAddress: string;
+      amountInCents: number;
+      checkoutSessionId: string;
+    }
+  ): Promise<CheckoutPaymentVerification> {
+    const merchant = new PublicKey(expected.merchantWalletAddress);
+    const usdcMint = new PublicKey(this.GetUSDCMintAddress());
+    const merchantTokenAccount = await getAssociatedTokenAddress(
+      usdcMint,
+      merchant
+    );
+    const merchantTokenAccountStr = merchantTokenAccount.toBase58();
+
+    // Poll for the transaction to reach 'confirmed' commitment
+    let tx: ParsedTransactionWithMeta | null = null;
+    for (let attempt = 0; attempt < CONFIRM_MAX_ATTEMPTS; attempt++) {
+      tx = await this.GetParsedTransaction(signature);
+      if (tx) break;
+      await Sleep(CONFIRM_POLL_MS);
+    }
+
+    if (!tx || !tx.meta) {
+      return {
+        verified: false,
+        amount_cents: 0,
+        payer_address: null,
+        failure_reason:
+          'Transaction not found on-chain (may not be confirmed yet)',
+      };
+    }
+
+    if (tx.meta.err) {
+      return {
+        verified: false,
+        amount_cents: 0,
+        payer_address: null,
+        failure_reason: `Transaction failed on-chain: ${JSON.stringify(
+          tx.meta.err
+        )}`,
+      };
+    }
+
+    let transferredAtomic = 0;
+    let payerAddress: string | null = null;
+    let memoMatches = false;
+
+    for (const instruction of tx.transaction.message.instructions) {
+      if (!('parsed' in instruction)) continue;
+
+      if (instruction.program === 'spl-token') {
+        const parsed = instruction.parsed;
+        if (parsed.type !== 'transfer' && parsed.type !== 'transferChecked') {
+          continue;
+        }
+
+        const info = parsed.info;
+        if (info.destination !== merchantTokenAccountStr) continue;
+
+        // transferChecked carries the mint; reject transfers of other tokens
+        if (info.mint && info.mint !== usdcMint.toBase58()) continue;
+
+        const amountRaw =
+          parsed.type === 'transferChecked'
+            ? info.tokenAmount?.amount || '0'
+            : info.amount || '0';
+
+        transferredAtomic += parseInt(amountRaw, 10);
+        payerAddress = info.authority || info.source || payerAddress;
+      }
+
+      if (instruction.program === 'spl-memo') {
+        // Parsed memo instructions expose the memo string directly
+        if (instruction.parsed === expected.checkoutSessionId) {
+          memoMatches = true;
+        }
+      }
+    }
+
+    const transferredCents = Math.floor(transferredAtomic / 10_000);
+
+    if (!memoMatches) {
+      return {
+        verified: false,
+        amount_cents: transferredCents,
+        payer_address: payerAddress,
+        failure_reason:
+          'Transaction does not reference this checkout session (memo missing or mismatched)',
+      };
+    }
+
+    if (transferredAtomic < expected.amountInCents * 10_000) {
+      return {
+        verified: false,
+        amount_cents: transferredCents,
+        payer_address: payerAddress,
+        failure_reason: `Insufficient amount: expected ${expected.amountInCents} cents, received ${transferredCents} cents`,
+      };
+    }
+
+    return {
+      verified: true,
+      amount_cents: transferredCents,
+      payer_address: payerAddress,
+    };
+  }
+
+  async CreateSubscriptionPlan(
+    priceId: string,
+    periodHours: number,
+    amountCents: number,
+    destinationAddress: string,
+    pullerAddress: string
+  ): Promise<string> {
+    const merchantSigner = await this.GetPlanOwnerSigner();
+
+    const merchantClient = createClient()
+      .use(signer(merchantSigner))
+      .use(
+        solanaRpc({
+          rpcUrl: process.env.SOLANA_RPC_URL || clusterApiUrl(this.network),
+        })
+      )
+      .use(subscriptionsProgram());
+
+    // USDC has 6 decimals → 10_000 base units = $0.01
+    const planId = PlanIdFromPriceId(priceId);
+    const tokenMint = address(this.GetUSDCMintAddress());
+    const amount = BigInt(amountCents * 10_000);
+    const periodHoursBigInt = BigInt(periodHours);
+    const metadataUri = '';
+    const destinations = [address(destinationAddress)];
+    const pullers = [address(pullerAddress)];
+
+    await merchantClient.subscriptions.instructions
+      .createPlan({
+        planId,
+        mint: tokenMint,
+        amount,
+        periodHours: periodHoursBigInt,
+        endTs: BigInt(0),
+        destinations,
+        pullers,
+        metadataUri,
+      })
+      .sendTransaction();
+
+    const [planPda] = await findPlanPda({
+      owner: merchantSigner.address,
+      planId,
+    });
+    return planPda;
   }
 }

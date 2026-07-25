@@ -6,8 +6,20 @@
 export interface AppConfig {
   /** MongoDB connection string */
   mongodbUri: string;
-  /** Dashboard URL (e.g., http://localhost:4200 or https://connect.yourdomain.com) */
+  /** Dashboard URL (e.g., http://localhost:4200 or https://dashboard.zoneless.com) */
   dashboardUrl: string;
+  /**
+   * Hosted checkout URL origin (e.g., https://checkout.zoneless.com).
+   * Defaults to dashboardUrl for single-domain / self-hosted deployments.
+   * Session links are always `{checkoutUrl}/c/{url_slug}` (opaque slug, not the API id).
+   */
+  checkoutUrl: string;
+  /**
+   * Payment Link URL origin (e.g., https://pay.zoneless.com).
+   * Defaults to checkoutUrl for single-domain / self-hosted deployments.
+   * Payment link URLs are always `{paymentLinkUrl}/b/{url_slug}` (opaque slug, not the API id).
+   */
+  paymentLinkUrl: string;
   /**
    * Master application secret (from APP_SECRET env or auto-generated).
    * Purpose-specific keys (JWT, encryption) are derived from this via HKDF.
@@ -48,6 +60,8 @@ export interface PublicConfig {
   terms_url: string;
   /** URL to the platform's Privacy Policy page (empty string if not set) */
   privacy_url: string;
+  /** True if running in live mode, false for test mode */
+  livemode: boolean;
 }
 
 /**
@@ -62,6 +76,8 @@ export interface SetupStatus {
   has_wallet: boolean;
   /** Whether the authenticated user is a connected account (should redirect away from setup) */
   is_connected_account?: boolean;
+  /** True when the instance is operator-managed (public setup is disabled) */
+  operator_mode?: boolean;
 }
 
 /**

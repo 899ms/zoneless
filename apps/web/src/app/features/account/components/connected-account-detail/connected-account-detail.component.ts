@@ -10,6 +10,7 @@ import { DatePipe } from '@angular/common';
 import { Account, Person } from '@zoneless/shared-types';
 import { StatusChipComponent } from '../../../../shared';
 import { AccountService } from '../../../../data/services/account.service';
+import { GetCountryName } from '../../../../utils';
 
 @Component({
   selector: 'app-connected-account-detail',
@@ -45,12 +46,13 @@ export class ConnectedAccountDetailComponent {
   }
 
   GetDisplayName(): string {
-    if (this.person?.first_name || this.person?.last_name) {
-      return [this.person.first_name, this.person.last_name]
-        .filter(Boolean)
-        .join(' ');
-    }
-    return this.account.email ?? 'No name';
+    const accountWithPerson: Account = {
+      ...this.account,
+      individual: this.person ?? this.account.individual,
+    };
+    const name =
+      this.accountService.GetConnectedAccountDisplayName(accountWithPerson);
+    return name === this.account.id ? 'No name' : name;
   }
 
   GetEmail(): string | null {
@@ -61,12 +63,9 @@ export class ConnectedAccountDetailComponent {
     return this.account.payouts_enabled ? 'enabled' : 'restricted';
   }
 
-  GetStatusLabel(): string {
-    return this.account.payouts_enabled ? 'Enabled' : 'Restricted';
-  }
-
   GetCountry(): string {
-    return this.account.country ?? 'Unknown';
+    if (!this.account.country) return 'Unknown';
+    return GetCountryName(this.account.country) || this.account.country;
   }
 
   GetCreatedDate(): number {

@@ -25,6 +25,14 @@ export function DeterministicId(prefix: string): string {
   return `${prefix}_test${String(idCounter).padStart(3, '0')}`;
 }
 
+/**
+ * Returns a deterministic public URL slug (test-mode shaped).
+ */
+export function DeterministicUrlSlug(): string {
+  idCounter++;
+  return `test_slug${String(idCounter).padStart(3, '0')}`;
+}
+
 // ---------------------------------------------------------------------------
 // Fixed timestamp
 // ---------------------------------------------------------------------------
@@ -43,6 +51,7 @@ export function CreateMockDatabase(): jest.Mocked<Database> {
   mockDb.Set = jest.fn().mockResolvedValue(undefined);
   mockDb.Get = jest.fn().mockResolvedValue(null);
   mockDb.Update = jest.fn().mockResolvedValue(undefined);
+  mockDb.FindOneAndUpdateByFilter = jest.fn().mockResolvedValue(null);
   mockDb.Delete = jest.fn().mockResolvedValue({ deletedCount: 1 });
   mockDb.Find = jest.fn().mockResolvedValue([]);
   mockDb.Find2Custom = jest.fn().mockResolvedValue([]);

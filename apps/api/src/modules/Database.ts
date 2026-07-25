@@ -46,6 +46,26 @@ export class Database {
   }
 
   /**
+   * Atomically find and update a document matching an arbitrary filter.
+   * Returns null when no document matches (e.g. claim already taken).
+   */
+  async FindOneAndUpdateByFilter<T>(
+    collection: string,
+    filter: Record<string, unknown>,
+    data: Record<string, unknown>,
+    session?: ClientSession
+  ): Promise<T | null> {
+    const model = this.GetModel(collection);
+    const options: mongoose.QueryOptions = { new: true };
+    if (session) options.session = session;
+    const result = await model
+      .findOneAndUpdate(filter, data, options)
+      .lean()
+      .exec();
+    return result ? this.StripMongoFields(result as T) : null;
+  }
+
+  /**
    * Add a new document with auto-generated MongoDB _id
    */
   async Add<T>(collection: string, data: Partial<T>): Promise<T> {
@@ -86,6 +106,25 @@ export class Database {
       .lean()
       .exec();
     return result ? this.StripMongoFields(result as T) : null;
+  }
+
+  /**
+   * Atomically increment a numeric field on a document, creating the
+   * document if it doesn't exist (upsert).
+   */
+  async Increment(
+    collection: string,
+    documentId: string,
+    field: string,
+    amount = 1,
+    setOnInsert?: Record<string, unknown>
+  ): Promise<void> {
+    const model = this.GetModel(collection);
+    const update: Record<string, unknown> = { $inc: { [field]: amount } };
+    if (setOnInsert) {
+      update.$setOnInsert = setOnInsert;
+    }
+    await model.updateOne({ id: documentId }, update, { upsert: true }).exec();
   }
 
   /**
@@ -409,6 +448,7 @@ export class Database {
       'Persons',
       'TopUps',
       'Transfers',
+      'UsageCounters',
       'WebhookEndpoints',
     ];
 

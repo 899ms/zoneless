@@ -1,6 +1,7 @@
 import { Injectable, signal, WritableSignal, inject } from '@angular/core';
 import { ApiService } from '../../core/services/api.service';
 import { Account, LoginLink } from '@zoneless/shared-types';
+import { CreateAccountInput } from '@zoneless/shared-schemas';
 
 /**
  * Input type for updating an account.
@@ -94,6 +95,13 @@ export class AccountService {
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
+   * Create a connected account (platform API key only).
+   */
+  async CreateAccount(data: CreateAccountInput): Promise<Account> {
+    return this.api.Call<Account>('POST', 'accounts', data);
+  }
+
+  /**
    * Fetch any account by ID (used for viewing connected accounts).
    * Sets the selectedConnectedAccount signal for panel display.
    */
@@ -136,15 +144,22 @@ export class AccountService {
 
   /**
    * Get the display name for an account.
-   * Returns the person's full name if available, otherwise the email.
+   * Prefers business name, then person's name, then email.
    */
   GetConnectedAccountDisplayName(account: Account): string {
+    const businessName = account.business_profile?.name?.trim();
+    if (businessName) return businessName;
+
+    const displayName = account.settings?.dashboard?.display_name?.trim();
+    if (displayName) return displayName;
+
     const individual = account.individual;
     if (individual?.first_name || individual?.last_name) {
       return [individual.first_name, individual.last_name]
         .filter(Boolean)
         .join(' ');
     }
-    return account.email ?? account.id;
+
+    return account.email ?? individual?.email ?? account.id;
   }
 }

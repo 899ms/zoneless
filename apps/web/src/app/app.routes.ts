@@ -7,11 +7,13 @@ export const routes: Routes = [
     pathMatch: 'full',
   },
   {
-    path: 'account/:view',
+    path: 'account',
     loadComponent: () =>
       import('./features/account/account.component').then(
-        (mod) => mod.AccountComponent
+        (m) => m.AccountComponent
       ),
+    loadChildren: () =>
+      import('./features/account/account.routes').then((m) => m.accountRoutes),
   },
   {
     path: 'setup',
@@ -49,6 +51,20 @@ export const routes: Routes = [
       ),
   },
   {
+    path: 'c/:checkoutSessionId',
+    loadComponent: () =>
+      import('./features/checkout/checkout.component').then(
+        (m) => m.CheckoutComponent
+      ),
+  },
+  {
+    path: 'b/:paymentLinkId',
+    loadComponent: () =>
+      import('./features/payment-link/payment-link.component').then(
+        (m) => m.PaymentLinkComponent
+      ),
+  },
+  {
     path: '',
     redirectTo: '/account/home',
     pathMatch: 'full',
@@ -57,7 +73,7 @@ export const routes: Routes = [
     path: '**',
     loadComponent: () =>
       import('./features/not-found/not-found.component').then(
-        (mod) => mod.NotFoundComponent
+        (m) => m.NotFoundComponent
       ),
   },
 ];

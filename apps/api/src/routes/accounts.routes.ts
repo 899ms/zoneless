@@ -23,7 +23,7 @@ import {
   CreateAccountSchema,
   UpdateAccountSchema,
   RejectAccountSchema,
-} from '../schemas/AccountSchema';
+} from '@zoneless/shared-schemas';
 
 import { Account as AccountType } from '@zoneless/shared-types';
 
@@ -167,6 +167,10 @@ router.get(
         endingBefore,
         created,
       });
+
+      result.data = await Promise.all(
+        result.data.map((account) => PopulateAccountResources(account, false))
+      );
 
       res.json(result);
     } catch (error: unknown) {

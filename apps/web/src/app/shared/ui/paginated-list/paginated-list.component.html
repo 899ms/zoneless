@@ -11,7 +11,7 @@
   <tbody>
     @if (!loading() && items().length > 0) { @for (item of items(); track
     item.id) {
-    <tr class="row" (click)="OnRowClick(item)">
+    <tr class="row more-icon-highlight" (click)="OnRowClick(item)">
       @for (column of columns; track column.field) {
       <td>
         <div
@@ -19,7 +19,43 @@
           [class.bold-cell]="column.bolded"
           [class.dimmed-cell]="column.dimmed"
         >
-          @switch (column.type) { @case ('currency') {
+          @if (column.progressGetter) {
+          <svg class="progress-ring" viewBox="0 0 20 20" aria-hidden="true">
+            <circle
+              class="progress-ring-track"
+              cx="10"
+              cy="10"
+              r="7"
+              fill="none"
+            />
+            @if (GetColumnProgress(item, column); as progress) {
+            <circle
+              class="progress-ring-value"
+              cx="10"
+              cy="10"
+              r="7"
+              fill="none"
+              [attr.stroke-dasharray]="GetProgressDasharray(progress)"
+            />
+            }
+          </svg>
+          } @if (column.imageField) {
+          <div class="image-cell">
+            @if (GetItemImage(item, column.imageField)) {
+            <img
+              class="image-thumbnail"
+              [src]="GetItemImage(item, column.imageField)"
+              alt=""
+            />
+            } @else {
+            <img
+              class="large-icon"
+              [src]="'assets/icons/' + column.placeholderIcon"
+              alt=""
+            />
+            }
+          </div>
+          } @switch (column.type) { @case ('currency') {
           <span
             >${{ GetItemNumber(item, column.field) | number : '1.2-2' }}</span
           >
@@ -36,7 +72,8 @@
           </span>
           } @case ('date') {
           <span>{{
-            GetItemDate(item, column.field) | date : 'd MMM y, HH:mm'
+            GetItemDate(item, column.field)
+              | date : column.dateFormat || 'MMM d, h:mm a'
           }}</span>
           } @case ('status') {
           <app-status-chip
@@ -46,6 +83,11 @@
           <span>{{
             GetItemNumber(item, column.field) | number : '1.0-2'
           }}</span>
+          } @case ('actions') {
+          <app-popup-menu
+            [actions]="column.actions || []"
+            [item]="item"
+          ></app-popup-menu>
           } @default { @if (column.capitalize) {
           <span>{{ GetItemString(item, column) | titlecase }}</span>
           } @else {
@@ -97,5 +139,10 @@
       Next
     </button>
   </div>
+</div>
+} @else if (showResultCount && !loading() && items().length > 0) {
+<div class="result-count">
+  {{ items().length }}
+  {{ items().length === 1 ? 'result' : 'results' }}
 </div>
 }

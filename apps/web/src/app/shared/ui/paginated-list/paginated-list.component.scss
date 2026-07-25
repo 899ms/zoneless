@@ -10,7 +10,7 @@ table {
 th,
 td {
   text-align: left;
-  padding: $spacing-small $spacing-small;
+  padding: $spacing-snug $spacing;
 }
 
 th:first-child,
@@ -24,7 +24,7 @@ td:last-child {
 }
 
 th {
-  border-bottom: 1px solid $lightest-background-color;
+  border-bottom: 1px solid $darkest-background-color;
   font-weight: 600;
   color: $text-color;
   opacity: $dimmed;
@@ -33,23 +33,24 @@ th {
 }
 
 .row {
-  border-bottom: 1px solid $lighter-background-color;
+  border-bottom: 1px solid $darker-background-color;
   transition: $transition-fast;
   cursor: pointer;
 }
 
 .row:hover {
-  background-color: $light-background-color;
+  background-color: $dark-background-color;
 }
 
 .row td {
-  padding-top: $spacing-small;
-  padding-bottom: $spacing-small;
+  padding-top: $spacing-snug;
+  padding-bottom: $spacing-snug;
 }
 
 .data-cell {
   display: flex;
   align-items: center;
+  gap: $spacing-small;
 }
 
 .bold-cell {
@@ -58,6 +59,50 @@ th {
 
 .dimmed-cell {
   opacity: $dimmed;
+}
+
+.progress-ring {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  transform: rotate(-90deg);
+}
+
+.progress-ring-track {
+  stroke: $darkest-background-color;
+  stroke-width: 2.5;
+}
+
+.progress-ring-value {
+  stroke: $base-color;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.image-cell {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: $dark-background-color;
+  border-radius: $border-radius-small;
+  overflow: hidden;
+  margin-right: $spacing-extra-small;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.image-cell .image-thumbnail {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: cover;
+}
+
+.image-cell .large-icon {
+  opacity: $dimmed-disabled;
+  width: 20px;
+  height: 20px;
 }
 
 .currency-value {
@@ -78,6 +123,13 @@ th {
   opacity: $dimmed;
 }
 
+.result-count {
+  margin-top: $spacing;
+  font-size: $font-size-small;
+  font-weight: 500;
+  color: $base-color;
+}
+
 .loading-skeleton {
   margin-top: $spacing-small;
 }
@@ -86,9 +138,9 @@ th {
   height: 40px;
   background: linear-gradient(
     90deg,
-    $lighter-background-color 25%,
-    $light-background-color 50%,
-    $lighter-background-color 75%
+    $darker-background-color 25%,
+    $dark-background-color 50%,
+    $darker-background-color 75%
   );
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
@@ -114,7 +166,7 @@ th {
 }
 
 .page-info {
-  font-size: $font-size;
+  font-size: $font-size-small;
   color: $text-color;
 }
 
@@ -141,11 +193,11 @@ th {
   transition: $transition-fast;
   background-color: $background-color;
   color: $text-color;
-  border: 1px solid $lightest-background-color;
+  border: 1px solid $darkest-background-color;
 }
 
 .pagination-button:hover:not(.pagination-disabled) {
-  background-color: $light-background-color;
+  background-color: $dark-background-color;
 }
 
 .pagination-disabled {

@@ -1,6 +1,7 @@
 import * as express from 'express';
 import { ValidateApiKey } from '../middleware/AuthMiddleware';
 import { IdempotencyMiddleware } from '../middleware/IdempotencyMiddleware';
+import { UsageMiddleware } from '../middleware/UsageMiddleware';
 
 import accountsRouter from './accounts.routes';
 import personsRouter from './persons.routes';
@@ -18,6 +19,20 @@ import eventsRouter from './events.routes';
 import authExchangeRouter from './exchange.routes';
 import configRouter from './config.routes';
 import setupRouter from './setup.routes';
+import operatorRouter from './operator.routes';
+import subscriptionsRouter from './subscriptions.routes';
+import productsRouter from './products.routes';
+import pricesRouter from './prices.routes';
+import customersRouter from './customers.routes';
+import checkoutSessionsRouter from './checkoutSessions.routes';
+import paymentPagesRouter from './paymentPages.routes';
+import paymentLinksRouter from './paymentLinks.routes';
+import paymentIntentsRouter from './paymentIntents.routes';
+import chargesRouter from './charges.routes';
+import invoiceItemsRouter from './invoiceItems.routes';
+import invoicesRouter from './invoices.routes';
+import reportingRouter from './reporting.routes';
+import billingRouter from './billing.routes';
 
 const router = express.Router();
 
@@ -25,10 +40,22 @@ const router = express.Router();
 router.use('/auth', authExchangeRouter);
 router.use('/config', configRouter);
 router.use('/setup', setupRouter);
+// Hosted checkout page bootstrap - the unguessable session ID is the credential
+router.use('/payment_pages', paymentPagesRouter);
+
+// --- Operator Routes ---
+// Guarded by the operator API key (managed hosting only)
+router.use('/operator', operatorRouter);
+
+// Billing run: operator key (Cloud Scheduler) or platform API key endpoints.
+router.use('/billing', billingRouter);
 
 // --- Authenticated Routes ---
 // All routes below this line require an API Key
 router.use(ValidateApiKey);
+
+// Record per-platform API usage (operator mode only)
+router.use(UsageMiddleware);
 
 // Apply Idempotency to all authenticated routes
 router.use(IdempotencyMiddleware);
@@ -49,5 +76,15 @@ router.use('/topups', topupsRouter);
 router.use('/webhook_endpoints', webhookEndpointsRouter);
 router.use('/api_keys', apiKeysRouter);
 router.use('/events', eventsRouter);
-
+router.use('/subscriptions', subscriptionsRouter);
+router.use('/products', productsRouter);
+router.use('/prices', pricesRouter);
+router.use('/customers', customersRouter);
+router.use('/checkout/sessions', checkoutSessionsRouter);
+router.use('/payment_links', paymentLinksRouter);
+router.use('/payment_intents', paymentIntentsRouter);
+router.use('/charges', chargesRouter);
+router.use('/invoiceitems', invoiceItemsRouter);
+router.use('/invoices', invoicesRouter);
+router.use('/reporting', reportingRouter);
 export default router;
