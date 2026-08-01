@@ -5,13 +5,19 @@ import {
   inject,
   signal,
   WritableSignal,
+  ViewChild,
 } from '@angular/core';
 import { Router } from '@angular/router';
 import { FormsModule } from '@angular/forms';
 
 import { MetaService, StorageService } from '../../core';
 import { SetupService } from '../../data';
-import { PageLoaderComponent, LoaderComponent } from '../../shared';
+import {
+  BusinessProfileFormComponent,
+  BusinessProfileSetupData,
+  PageLoaderComponent,
+  LoaderComponent,
+} from '../../shared';
 import { SetupResponse } from '@zoneless/shared-types';
 
 enum SetupStep {
@@ -26,10 +32,18 @@ enum SetupStep {
   templateUrl: './setup.component.html',
   styleUrls: ['./setup.component.scss'],
   standalone: true,
-  imports: [FormsModule, PageLoaderComponent, LoaderComponent],
+  imports: [
+    FormsModule,
+    PageLoaderComponent,
+    LoaderComponent,
+    BusinessProfileFormComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class SetupComponent implements OnInit {
+  @ViewChild('platformDetailsForm')
+  platformDetailsForm!: BusinessProfileFormComponent;
+
   private readonly meta = inject(MetaService);
   private readonly router = inject(Router);
   private readonly storage = inject(StorageService);
@@ -42,12 +56,12 @@ export class SetupComponent implements OnInit {
   submitting: WritableSignal<boolean> = signal(false);
   error: WritableSignal<string> = signal('');
   operatorMode: WritableSignal<boolean> = signal(false);
+  platformShowErrors: WritableSignal<boolean> = signal(false);
+  platformDetails: WritableSignal<BusinessProfileSetupData | null> =
+    signal(null);
 
-  // Form data
-  platformName: WritableSignal<string> = signal('');
-  platformLogoUrl: WritableSignal<string> = signal('');
-  termsUrl: WritableSignal<string> = signal('');
-  privacyUrl: WritableSignal<string> = signal('');
+  /** Anonymous usage telemetry opt-in (default off; self-host setup only) */
+  telemetryEnabled: WritableSignal<boolean> = signal(false);
 
   // Wallet options
   walletOption: WritableSignal<'generate' | 'import'> = signal('generate');
@@ -124,10 +138,12 @@ export class SetupComponent implements OnInit {
         return true;
 
       case SetupStep.PLATFORM:
-        if (!this.platformName().trim()) {
-          this.error.set('Platform name is required');
+        this.platformShowErrors.set(true);
+        if (!this.platformDetailsForm?.ValidateAll()) {
           return false;
         }
+        this.platformDetails.set(this.platformDetailsForm.GetSetupData());
+        this.platformShowErrors.set(false);
         return true;
 
       case SetupStep.WALLET:
@@ -199,12 +215,16 @@ export class SetupComponent implements OnInit {
           ? this.generatedPublicKey()
           : this.importPublicKey().trim();
 
+      const platformDetails = this.platformDetails();
+      if (!platformDetails) {
+        this.error.set('Platform details are missing. Please go back.');
+        return;
+      }
+
       const response = await this.setupService.CompleteSetup({
-        platform_name: this.platformName().trim(),
-        platform_logo_url: this.platformLogoUrl().trim() || undefined,
-        terms_url: this.termsUrl().trim() || undefined,
-        privacy_url: this.privacyUrl().trim() || undefined,
+        ...platformDetails,
         solana_public_key: publicKey,
+        telemetry_enabled: this.telemetryEnabled(),
       });
 
       this.setupResult.set(response);

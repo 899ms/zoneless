@@ -35,6 +35,7 @@ import {
   UpdatePayoutInput,
   BuildPayoutsBatchInput,
   BroadcastPayoutsBatchInput,
+  IsRejectedAccountReason,
 } from '@zoneless/shared-schemas';
 
 /**
@@ -124,6 +125,31 @@ export class PayoutModule {
     if (amount <= 0) {
       throw new AppError(
         'Amount must be greater than 0',
+        400,
+        'invalid_request_error'
+      );
+    }
+
+    const accountRecord = await this.accountModule.GetAccount(account);
+    if (!accountRecord) {
+      throw new AppError(
+        ERRORS.ACCOUNT_NOT_FOUND.message,
+        ERRORS.ACCOUNT_NOT_FOUND.status,
+        ERRORS.ACCOUNT_NOT_FOUND.type
+      );
+    }
+
+    if (IsRejectedAccountReason(accountRecord.requirements?.disabled_reason)) {
+      throw new AppError(
+        'This account has been rejected and cannot create payouts.',
+        400,
+        'invalid_request_error'
+      );
+    }
+
+    if (!accountRecord.payouts_enabled) {
+      throw new AppError(
+        'Payouts are not enabled for this account. Complete onboarding and identity requirements first.',
         400,
         'invalid_request_error'
       );
@@ -643,18 +669,6 @@ export class PayoutModule {
       recipients
     );
 
-    // Mark all payouts as processing (to prevent duplicate builds)
-    await this.db.RunTransaction(async (session: ClientSession) => {
-      for (const payout of payouts) {
-        await this.db.Update(
-          'Payouts',
-          payout.id,
-          { status: 'processing' },
-          session
-        );
-      }
-    });
-
     const totalAmount = payouts.reduce((sum, p) => sum + p.amount, 0);
 
     return {
@@ -696,7 +710,7 @@ export class PayoutModule {
         );
       }
 
-      // Verify payout is in processing state (was built)
+      // Accept legacy processing payouts as well as newly built pending payouts.
       if (payout.status !== 'processing' && payout.status !== 'pending') {
         throw new AppError(
           `Payout ${payoutId} is not ready for broadcast (status: ${payout.status})`,

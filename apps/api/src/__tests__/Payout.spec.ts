@@ -119,6 +119,24 @@ describe('PayoutModule', () => {
     });
   });
 
+  describe('CreatePayout', () => {
+    it('should reject when payouts are not enabled', async () => {
+      jest
+        .spyOn((module as any).accountModule, 'GetAccount')
+        .mockResolvedValue({
+          id: 'acct_z_seller',
+          payouts_enabled: false,
+        });
+
+      await expect(
+        module.CreatePayout('acct_z_seller', {
+          amount: 1000,
+          currency: 'usdc',
+        })
+      ).rejects.toThrow(/Payouts are not enabled/);
+    });
+  });
+
   describe('UpdatePayout', () => {
     it('should update payout metadata', async () => {
       const existingPayout = {
@@ -198,6 +216,53 @@ describe('PayoutModule', () => {
       await expect(module.CancelPayout('po_z_1')).rejects.toThrow(
         'Payout cannot be canceled'
       );
+    });
+  });
+
+  describe('BuildPayoutsBatch', () => {
+    it('keeps payouts pending while waiting for a client signature', async () => {
+      const payout = {
+        id: 'po_z_1',
+        object: 'payout',
+        account: 'acct_z_seller',
+        platform_account: 'acct_z_platform',
+        amount: 1000,
+        currency: 'usdc',
+        destination: 'wa_z_seller',
+        status: 'pending',
+      } as Payout;
+      jest.spyOn(module, 'GetPayout').mockResolvedValue(payout);
+      jest
+        .spyOn((module as any).accountModule, 'GetAccount')
+        .mockResolvedValue({
+          id: 'acct_z_seller',
+          platform_account: 'acct_z_platform',
+        });
+      jest
+        .spyOn((module as any).externalWalletModule, 'GetExternalWallet')
+        .mockResolvedValue({
+          id: 'wa_z_seller',
+          wallet_address: 'seller_wallet',
+        });
+      jest
+        .spyOn(
+          (module as any).externalWalletModule,
+          'GetExternalWalletsByAccount'
+        )
+        .mockResolvedValue([
+          {
+            id: 'wa_z_platform',
+            wallet_address: 'platform_wallet',
+            default_for_currency: true,
+          },
+        ]);
+
+      const result = await module.BuildPayoutsBatch('acct_z_platform', {
+        payouts: [payout.id],
+      });
+
+      expect(result.payouts).toEqual([payout]);
+      expect(mockDb.Update).not.toHaveBeenCalled();
     });
   });
 });

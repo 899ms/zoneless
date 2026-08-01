@@ -20,13 +20,16 @@ import {
   TransactionService,
   WebhookEndpointService,
   TopupService,
+  ConfigService,
+  TelemetryService,
 } from '../../../data';
 import {
+  BusinessProfileFormComponent,
   ExternalWalletFormComponent,
   PersonFormComponent,
   SettingsCardComponent,
+  SlidePanelComponent,
 } from '../../../shared';
-import { SlidePanelComponent } from '../../../shared';
 
 @Component({
   selector: 'app-settings',
@@ -34,6 +37,7 @@ import { SlidePanelComponent } from '../../../shared';
     SlidePanelComponent,
     PersonFormComponent,
     ExternalWalletFormComponent,
+    BusinessProfileFormComponent,
     SettingsCardComponent,
   ],
   templateUrl: './settings.component.html',
@@ -43,6 +47,8 @@ import { SlidePanelComponent } from '../../../shared';
 export class SettingsComponent implements OnInit {
   @ViewChild('editPersonForm') editPersonForm!: PersonFormComponent;
   @ViewChild('editWalletForm') editWalletForm!: ExternalWalletFormComponent;
+  @ViewChild('editBusinessForm')
+  editBusinessForm!: BusinessProfileFormComponent;
 
   readonly personService = inject(PersonService);
   readonly externalWalletService = inject(ExternalWalletService);
@@ -53,6 +59,8 @@ export class SettingsComponent implements OnInit {
   readonly webhookEndpointService = inject(WebhookEndpointService);
   readonly apiKeyService = inject(ApiKeyService);
   readonly topupService = inject(TopupService);
+  readonly configService = inject(ConfigService);
+  readonly telemetryService = inject(TelemetryService);
   readonly router = inject(Router);
   private readonly metaService = inject(MetaService);
 
@@ -67,8 +75,69 @@ export class SettingsComponent implements OnInit {
   editWalletShowErrors: WritableSignal<boolean> = signal(false);
   walletFormValid: WritableSignal<boolean> = signal(false);
 
+  // Edit business details panel state
+  editBusinessPanelOpen: WritableSignal<boolean> = signal(false);
+  editBusinessLoading: WritableSignal<boolean> = signal(false);
+  editBusinessShowErrors: WritableSignal<boolean> = signal(false);
+
+  telemetrySaving: WritableSignal<boolean> = signal(false);
+
   ngOnInit(): void {
     this.metaService.SetMetaTitle('Settings');
+    if (this.authService.isPlatform()) {
+      this.telemetryService.GetStatus();
+    }
+  }
+
+  async OnTelemetryToggle(checked: boolean): Promise<void> {
+    this.telemetrySaving.set(true);
+    try {
+      await this.telemetryService.SetEnabled(checked);
+    } catch (error) {
+      console.error('Failed to update telemetry preference:', error);
+      await this.telemetryService.GetStatus();
+    } finally {
+      this.telemetrySaving.set(false);
+    }
+  }
+
+  // Edit Business Panel
+  OnEditBusinessClick(): void {
+    this.editBusinessShowErrors.set(false);
+    this.editBusinessPanelOpen.set(true);
+  }
+
+  OnEditBusinessPanelClosed(): void {
+    this.editBusinessPanelOpen.set(false);
+    this.editBusinessShowErrors.set(false);
+  }
+
+  async OnEditBusinessSubmit(): Promise<void> {
+    if (!this.editBusinessForm) return;
+
+    this.editBusinessShowErrors.set(true);
+
+    if (!this.editBusinessForm.ValidateAll()) {
+      return;
+    }
+
+    const account = this.GetAccount();
+    if (!account) return;
+
+    this.editBusinessLoading.set(true);
+
+    try {
+      const updateData = this.editBusinessForm.GetUpdateData();
+      await this.accountService.UpdateAccount(account.id, updateData);
+      this.configService.ClearConfig();
+      await this.configService.LoadConfig();
+      this.editBusinessPanelOpen.set(false);
+      this.editBusinessShowErrors.set(false);
+    } catch (error) {
+      console.error('Failed to update business details:', error);
+    } finally {
+      this.editBusinessLoading.set(false);
+    }
   }
 
   // Edit Person Panel
@@ -170,6 +239,7 @@ export class SettingsComponent implements OnInit {
     this.webhookEndpointService.Reset();
     this.apiKeyService.Reset();
     this.topupService.Reset();
+    this.telemetryService.Reset();
     this.router.navigateByUrl('/');
   }
 }

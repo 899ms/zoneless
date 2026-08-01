@@ -19,11 +19,17 @@
 
 .field-help {
   font-size: $font-size-small;
+  margin-top: $spacing-small;
   margin-bottom: $spacing-small;
   opacity: $dimmed;
 }
 
 .field-help * {
+  font-size: $font-size-small;
+}
+
+.fund-error {
+  color: #dc2626;
   font-size: $font-size-small;
 }
 
@@ -149,6 +155,7 @@ input[type='date'],
 input[type='number'],
 input[type='email'],
 input[type='password'],
+input[type='url'],
 input[type='time'],
 input[type='datetime-local'],
 input[type='tel'] {

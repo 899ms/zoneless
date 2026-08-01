@@ -424,6 +424,9 @@ export class Database {
       case 'not-in':
       case QueryOperators['not-in']:
         return { [field]: { $nin: value } };
+      case 'exists':
+      case QueryOperators.exists:
+        return { [field]: { $exists: value === true } };
       default:
         return { [field]: value };
     }
@@ -449,6 +452,7 @@ export class Database {
       'TopUps',
       'Transfers',
       'UsageCounters',
+      'TelemetryConfigs',
       'WebhookEndpoints',
     ];
 

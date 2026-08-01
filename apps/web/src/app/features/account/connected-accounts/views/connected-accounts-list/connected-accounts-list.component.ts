@@ -2,40 +2,34 @@ import {
   ChangeDetectionStrategy,
   Component,
   inject,
-  signal,
-  WritableSignal,
   OnInit,
   OnDestroy,
   ViewChild,
+  WritableSignal,
+  signal,
 } from '@angular/core';
+import { Router } from '@angular/router';
 
 import type { PaginatedListColumn } from '../../../../../shared';
 import { MetaService } from '../../../../../core';
-import {
-  PaginatedListComponent,
-  SlidePanelComponent,
-  LoaderComponent,
-} from '../../../../../shared';
+import { PaginatedListComponent } from '../../../../../shared';
 
-import { ConnectedAccountDetailComponent } from '../../../components';
 import { CreateConnectedAccountHostComponent } from '../../components/create-connected-account-host/create-connected-account-host.component';
 import { ConnectedAccountActionsService } from '../../services/connected-account-actions.service';
 
 import { AccountService } from '../../../../../data';
 
 import type { Account } from '@zoneless/shared-types';
-import { GetCountryName } from '../../../../../utils';
+import type { ConnectedAccountListStatus } from '@zoneless/shared-schemas';
 import { Subscription } from 'rxjs';
+import {
+  FormatAccountCountry,
+  GetAccountStatus,
+} from '../../util/connected-account-display';
 
 @Component({
   selector: 'app-connected-accounts-list',
-  imports: [
-    PaginatedListComponent,
-    SlidePanelComponent,
-    LoaderComponent,
-    ConnectedAccountDetailComponent,
-    CreateConnectedAccountHostComponent,
-  ],
+  imports: [PaginatedListComponent, CreateConnectedAccountHostComponent],
   templateUrl: './connected-accounts-list.component.html',
   styleUrl: './connected-accounts-list.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -44,11 +38,24 @@ export class ConnectedAccountsListComponent implements OnInit, OnDestroy {
   readonly accountService = inject(AccountService);
   readonly actions = inject(ConnectedAccountActionsService);
   private readonly metaService = inject(MetaService);
+  private readonly router = inject(Router);
   private sub?: Subscription;
 
   @ViewChild('accountsList') accountsList?: PaginatedListComponent<any>;
 
-  connectedAccountPanelOpen: WritableSignal<boolean> = signal(false);
+  statusTab: WritableSignal<ConnectedAccountListStatus> = signal('all');
+  accountsQueryParams: WritableSignal<Record<string, string>> = signal({});
+
+  readonly statusTabs: Array<{
+    id: ConnectedAccountListStatus;
+    label: string;
+  }> = [
+    { id: 'all', label: 'All' },
+    { id: 'restricted', label: 'Restricted' },
+    { id: 'requires_review', label: 'Requires review' },
+    { id: 'rejected', label: 'Rejected' },
+    { id: 'enabled', label: 'Enabled' },
+  ];
 
   connectedAccountColumns: PaginatedListColumn[] = [
     {
@@ -64,20 +71,13 @@ export class ConnectedAccountsListComponent implements OnInit, OnDestroy {
       field: 'country',
       type: 'text',
       dimmed: true,
-      formatter: (item: unknown) => {
-        const account = item as Account;
-        if (!account.country) return '—';
-        return GetCountryName(account.country) || account.country;
-      },
+      formatter: (item: unknown) => FormatAccountCountry(item as Account),
     },
     {
       header: 'Account status',
       field: 'payouts_enabled',
       type: 'status',
-      formatter: (item: unknown) => {
-        const account = item as Account;
-        return account.payouts_enabled ? 'enabled' : 'restricted';
-      },
+      formatter: (item: unknown) => GetAccountStatus(item as Account),
     },
     {
       header: 'Connected on',
@@ -124,33 +124,18 @@ export class ConnectedAccountsListComponent implements OnInit, OnDestroy {
     this.sub?.unsubscribe();
   }
 
-  async OnConnectedAccountClick(item: unknown): Promise<void> {
+  SetStatusTab(tab: ConnectedAccountListStatus): void {
+    this.accountsQueryParams.set(tab === 'all' ? {} : { status: tab });
+    this.statusTab.set(tab);
+  }
+
+  OnConnectedAccountClick(item: unknown): void {
     const account = item as Account;
-    await this.OpenAccountPanel(account.id);
+    void this.router.navigate(['/account/connected-accounts', account.id]);
   }
 
-  async OnViewCreatedAccount(accountId: string): Promise<void> {
-    await this.OpenAccountPanel(accountId);
-  }
-
-  OnConnectedAccountPanelClosed(): void {
-    this.connectedAccountPanelOpen.set(false);
-    this.accountService.ClearSelectedConnectedAccount();
-  }
-
-  GetConnectedAccountPanelTitle(): string {
-    const account = this.accountService.selectedConnectedAccount();
-    if (!account) return 'Account details';
-    return this.accountService.GetConnectedAccountDisplayName(account);
-  }
-
-  private async OpenAccountPanel(accountId: string): Promise<void> {
-    this.connectedAccountPanelOpen.set(true);
-    try {
-      await this.accountService.LoadConnectedAccount(accountId);
-    } catch (error) {
-      console.error('Failed to load connected account details:', error);
-    }
+  OnViewCreatedAccount(accountId: string): void {
+    void this.router.navigate(['/account/connected-accounts', accountId]);
   }
 
   private CopyAccountId(account: Account): void {
