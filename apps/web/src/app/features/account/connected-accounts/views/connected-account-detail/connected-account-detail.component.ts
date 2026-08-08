@@ -47,9 +47,20 @@ import {
   GetAccountStatus,
   HasActiveCapabilities,
 } from '../../util/connected-account-display';
+import {
+  GetIdentityDocumentActionSubtitle,
+  GetIdentityDocumentImpactCopy,
+  GetIdentityDocumentMissingLabel,
+  GetIdentityDocumentPanelTitle,
+  GetIdentityDocumentRequirementState,
+  GetIdentityDocumentTaskDescription,
+  NeedsIdentityDocumentAction,
+  ResolveAccountPayoutVolumeThresholdCents,
+} from '../../util/identity-requirements';
 
 type DetailTab = 'overview' | 'payments';
 type MoneyMovementTab = 'transfers' | 'payouts';
+type DetailPanel = 'main' | 'identity_document';
 
 @Component({
   selector: 'app-connected-account-detail-view',
@@ -88,6 +99,7 @@ export class ConnectedAccountDetailViewComponent implements OnInit, OnDestroy {
   loading: WritableSignal<boolean> = signal(false);
   approvingIdentity: WritableSignal<boolean> = signal(false);
   activeTab: WritableSignal<DetailTab> = signal('overview');
+  detailPanel: WritableSignal<DetailPanel> = signal('main');
   moneyMovementTab: WritableSignal<MoneyMovementTab> = signal('payouts');
   paymentsTab: WritableSignal<MoneyMovementTab> = signal('transfers');
   availableBalance: WritableSignal<number> = signal(0);
@@ -110,6 +122,54 @@ export class ConnectedAccountDetailViewComponent implements OnInit, OnDestroy {
   readonly email = computed(() => {
     const account = this.account();
     return account?.email ?? account?.individual?.email ?? null;
+  });
+
+  readonly showIdentityAction = computed(() =>
+    NeedsIdentityDocumentAction(this.account())
+  );
+
+  readonly identityDocumentState = computed(() => {
+    const account = this.account();
+    return account ? GetIdentityDocumentRequirementState(account) : 'none';
+  });
+
+  readonly identityPanelTitle = computed(() =>
+    GetIdentityDocumentPanelTitle(this.displayName())
+  );
+
+  readonly identityPanelDescription = computed(() =>
+    GetIdentityDocumentTaskDescription(this.displayName())
+  );
+
+  readonly identityDocumentMissingLabel = computed(() =>
+    GetIdentityDocumentMissingLabel(this.identityDocumentState())
+  );
+
+  readonly payoutVolumeThresholdCents = computed(() => {
+    const account = this.account();
+    if (!account) return null;
+    return ResolveAccountPayoutVolumeThresholdCents(
+      account,
+      this.accountService.account()
+    );
+  });
+
+  readonly identityActionSubtitle = computed(() => {
+    const account = this.account();
+    if (!account) return '';
+    return GetIdentityDocumentActionSubtitle(
+      account,
+      this.payoutVolumeThresholdCents()
+    );
+  });
+
+  readonly identityImpactCopy = computed(() => {
+    const account = this.account();
+    if (!account) return '';
+    return GetIdentityDocumentImpactCopy(
+      account,
+      this.payoutVolumeThresholdCents()
+    );
   });
 
   readonly totalBalance = computed(
@@ -292,6 +352,7 @@ export class ConnectedAccountDetailViewComponent implements OnInit, OnDestroy {
   }
 
   private sub?: Subscription;
+  private actionsSub?: Subscription;
 
   @ViewChild('overviewTransfers')
   overviewTransfersList?: PaginatedListComponent<any>;
@@ -303,11 +364,14 @@ export class ConnectedAccountDetailViewComponent implements OnInit, OnDestroy {
   paymentsPayoutsList?: PaginatedListComponent<any>;
 
   async ngOnInit(): Promise<void> {
-    const id = this.route.snapshot.paramMap.get('accountId');
-    if (!id) return;
-    await this.LoadAccount(id);
-    this.metaService.SetMetaTitle(this.displayName());
-    this.sub = this.actions.events$.subscribe((event) => {
+    this.sub = this.route.paramMap.subscribe((params) => {
+      const id = params.get('accountId');
+      if (!id) return;
+      void this.OnAccountIdChange(id);
+    });
+    this.actionsSub = this.actions.events$.subscribe((event) => {
+      const id = this.account()?.id;
+      if (!id) return;
       if (
         (event.type === 'funds_added' ||
           event.type === 'funds_pulled' ||
@@ -325,7 +389,23 @@ export class ConnectedAccountDetailViewComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.sub?.unsubscribe();
+    this.actionsSub?.unsubscribe();
     clearTimeout(this.idCopiedTimer);
+  }
+
+  private async OnAccountIdChange(id: string): Promise<void> {
+    if (this.account()?.id === id) return;
+
+    this.account.set(null);
+    this.activeTab.set('overview');
+    this.detailPanel.set('main');
+    this.moneyMovementTab.set('payouts');
+    this.paymentsTab.set('transfers');
+    this.idCopied.set(false);
+    clearTimeout(this.idCopiedTimer);
+
+    await this.LoadAccount(id);
+    this.metaService.SetMetaTitle(this.displayName());
   }
 
   private async LoadAccount(id: string): Promise<void> {
@@ -517,6 +597,25 @@ export class ConnectedAccountDetailViewComponent implements OnInit, OnDestroy {
     } finally {
       this.approvingIdentity.set(false);
     }
+  }
+
+  OpenIdentityDocumentDetail(): void {
+    this.detailPanel.set('identity_document');
+  }
+
+  CloseIdentityDocumentDetail(): void {
+    this.detailPanel.set('main');
+  }
+
+  OnRequestInformation(): void {
+    const account = this.account();
+    if (account) void this.actions.OpenVerificationLink(account);
+  }
+
+  GetPayoutsMetaLabel(): string {
+    const account = this.account();
+    if (!account) return 'Payouts inactive';
+    return account.payouts_enabled ? 'Payouts active' : 'Payouts inactive';
   }
 
   private ReloadMoneyMovementLists(): void {

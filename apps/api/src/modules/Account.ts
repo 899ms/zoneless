@@ -31,6 +31,7 @@ import {
   REJECTED_DISABLED_REASONS,
   ConnectedAccountStatusFilter,
   IsRejectedAccountReason,
+  HasPayoutVolumeThresholdRules,
 } from '@zoneless/shared-schemas';
 import {
   ListHelper,
@@ -38,6 +39,8 @@ import {
   ListResult,
   FilterCondition,
 } from '../utils/ListHelper';
+import { EncryptIdentitySettings } from './identity/IdentitySettingsCrypto';
+import { IsIdentityProviderConfigured } from './identity/ResolveIdentityProvider';
 
 export class AccountModule {
   private readonly db: Database;
@@ -283,10 +286,75 @@ export class AccountModule {
               : defaults.payouts?.schedule,
           }
         : defaults.payouts,
+      identity:
+        input.identity !== undefined
+          ? EncryptIdentitySettings(
+              input.identity === null
+                ? null
+                : {
+                    ...defaults.identity,
+                    ...input.identity,
+                    didit:
+                      input.identity.didit === null
+                        ? null
+                        : input.identity.didit
+                        ? {
+                            ...defaults.identity?.didit,
+                            ...input.identity.didit,
+                          }
+                        : defaults.identity?.didit,
+                    rules:
+                      input.identity.rules === null
+                        ? null
+                        : input.identity.rules
+                        ? {
+                            ...defaults.identity?.rules,
+                            ...input.identity.rules,
+                          }
+                        : defaults.identity?.rules,
+                  }
+            ) ?? null
+          : defaults.identity,
       // Platform-specific settings
       terms_url: input.terms_url ?? defaults.terms_url,
       privacy_url: input.privacy_url ?? defaults.privacy_url,
     };
+  }
+
+  /**
+   * Threshold rules require a configured identity provider so accounts are not
+   * stuck with unverifiable document requirements.
+   */
+  private AssertIdentityThresholdsAllowed(
+    mergedAccount: AccountType,
+    previousAccount: AccountType | null | undefined
+  ): void {
+    const rules = mergedAccount.settings?.identity?.rules;
+    if (!HasPayoutVolumeThresholdRules(rules)) {
+      return;
+    }
+
+    const candidate: AccountType = {
+      ...mergedAccount,
+      settings: {
+        ...mergedAccount.settings,
+        identity: {
+          ...mergedAccount.settings?.identity,
+          didit: {
+            ...previousAccount?.settings?.identity?.didit,
+            ...mergedAccount.settings?.identity?.didit,
+          },
+        },
+      },
+    };
+
+    if (!IsIdentityProviderConfigured(candidate)) {
+      throw new AppError(
+        'Configure an identity provider API key and workflow ID before setting volume thresholds.',
+        400,
+        'invalid_request_error'
+      );
+    }
   }
 
   async GetAccount(accountId: string): Promise<AccountType | null> {
@@ -346,6 +414,114 @@ export class AccountModule {
     });
   }
 
+  /**
+   * Search connected accounts by email, name, or account id.
+   * Zoneless extension — not part of Stripe's Accounts API.
+   *
+   * Matches account email / business name / display name / id, plus person
+   * email / first name / last name / full name under the same platform.
+   */
+  async SearchAccounts(
+    platformAccountId: string,
+    query: string,
+    options: { limit?: number } = {}
+  ): Promise<ListResult<AccountType>> {
+    const url = '/v1/accounts/search';
+    const limit = Math.min(Math.max(options.limit ?? 10, 1), 100);
+    const trimmed = query.trim();
+
+    if (!trimmed) {
+      return { object: 'list', data: [], has_more: false, url };
+    }
+
+    const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = { $regex: escaped, $options: 'i' };
+    const accountIds = new Set<string>();
+
+    const accountHits = await this.db.Aggregate<{ id: string }>('Accounts', [
+      {
+        $match: {
+          platform_account: platformAccountId,
+          id: { $ne: platformAccountId },
+          $or: [
+            { id: regex },
+            { email: regex },
+            { 'business_profile.name': regex },
+            { 'settings.dashboard.display_name': regex },
+          ],
+        },
+      },
+      { $project: { id: 1 } },
+      { $limit: limit + 1 },
+    ]);
+
+    for (const hit of accountHits) {
+      if (hit.id) accountIds.add(hit.id);
+    }
+
+    if (accountIds.size <= limit) {
+      const personHits = await this.db.Aggregate<{ account: string }>(
+        'Persons',
+        [
+          {
+            $match: {
+              platform_account: platformAccountId,
+              $or: [
+                { email: regex },
+                { first_name: regex },
+                { last_name: regex },
+                {
+                  $expr: {
+                    $regexMatch: {
+                      input: {
+                        $trim: {
+                          input: {
+                            $concat: [
+                              { $ifNull: ['$first_name', ''] },
+                              ' ',
+                              { $ifNull: ['$last_name', ''] },
+                            ],
+                          },
+                        },
+                      },
+                      regex: escaped,
+                      options: 'i',
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          { $project: { account: 1 } },
+          { $limit: limit + 1 },
+        ]
+      );
+
+      for (const hit of personHits) {
+        if (hit.account && hit.account !== platformAccountId) {
+          accountIds.add(hit.account);
+        }
+      }
+    }
+
+    const orderedIds = [...accountIds];
+    const hasMore = orderedIds.length > limit;
+    const pageIds = orderedIds.slice(0, limit);
+
+    const accounts = (
+      await Promise.all(pageIds.map((id) => this.GetAccount(id)))
+    ).filter((account): account is AccountType => account !== null);
+
+    accounts.sort((a, b) => b.created - a.created);
+
+    return {
+      object: 'list',
+      data: accounts,
+      has_more: hasMore,
+      url,
+    };
+  }
+
   private BuildStatusFilters(
     status?: ConnectedAccountStatusFilter
   ): Record<string, unknown | FilterCondition> {
@@ -382,8 +558,10 @@ export class AccountModule {
             value: rejectedReasons,
           },
         };
-      case 'requires_review':
+      case 'in_review':
         // pending_verification[0] exists ⇒ array is non-empty
+        // OR person verification is pending (handled client-side for chips;
+        // list filter focuses on soft-review pending_verification).
         return {
           'requirements.pending_verification.0': {
             operator: QueryOperators.exists,
@@ -465,6 +643,13 @@ export class AccountModule {
       result.settings = this.MergeSettings(
         account?.settings || {},
         input.settings
+      );
+      this.AssertIdentityThresholdsAllowed(
+        {
+          ...(account || {}),
+          settings: result.settings,
+        } as AccountType,
+        account
       );
     }
 

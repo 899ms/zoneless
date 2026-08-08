@@ -99,11 +99,65 @@ const DashboardSettingsSchema = z
   })
   .partial();
 
+const IdentityDiditSettingsSchema = z
+  .object({
+    api_key: z.string().min(1).max(512).nullable(),
+    workflow_id: z.string().min(1).max(255).nullable(),
+    webhook_secret: z.string().min(1).max(512).nullable(),
+  })
+  .partial();
+
+const IdentityCountryThresholdSchema = z.object({
+  countries: z
+    .array(
+      z
+        .string()
+        .length(2, 'Country must be a 2-character ISO 3166-1 alpha-2 code')
+        .transform((c) => c.toUpperCase())
+    )
+    .min(1, 'At least one country is required'),
+  payout_volume_threshold_cents: z.number().int().nonnegative(),
+});
+
+const IdentityRulesSettingsSchema = z
+  .object({
+    payout_volume_threshold_cents: z.number().int().nonnegative().nullable(),
+    country_thresholds: z.array(IdentityCountryThresholdSchema).nullable(),
+  })
+  .partial()
+  .superRefine((rules, ctx) => {
+    const rows = rules.country_thresholds;
+    if (!rows?.length) return;
+
+    const seen = new Set<string>();
+    for (let i = 0; i < rows.length; i++) {
+      for (const code of rows[i].countries) {
+        if (seen.has(code)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Country ${code} appears in more than one threshold override`,
+            path: ['country_thresholds', i, 'countries'],
+          });
+        }
+        seen.add(code);
+      }
+    }
+  });
+
+const IdentitySettingsSchema = z
+  .object({
+    provider: z.enum(['didit']).nullable(),
+    didit: IdentityDiditSettingsSchema.nullable(),
+    rules: IdentityRulesSettingsSchema.nullable(),
+  })
+  .partial();
+
 const SettingsSchema = z
   .object({
     branding: BrandingSettingsSchema,
     dashboard: DashboardSettingsSchema,
     payouts: PayoutSettingsSchema,
+    identity: IdentitySettingsSchema.nullable(),
     // Platform-specific settings (only used for platform accounts)
     terms_url: z.string().url().nullable(),
     privacy_url: z.string().url().nullable(),
@@ -244,7 +298,7 @@ export const REJECTED_DISABLED_REASONS = [
 /** Status values accepted by GET /v1/accounts?status= (excluding "all") */
 export const CONNECTED_ACCOUNT_STATUS_FILTERS = [
   'restricted',
-  'requires_review',
+  'in_review',
   'rejected',
   'enabled',
 ] as const;

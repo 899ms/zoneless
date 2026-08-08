@@ -1,8 +1,9 @@
 import { Injectable, signal, WritableSignal, inject } from '@angular/core';
 import { ApiService } from '../../core/services/api.service';
-import { Account, LoginLink } from '@zoneless/shared-types';
+import { Account, ListResponse, LoginLink } from '@zoneless/shared-types';
 import {
   CreateAccountInput,
+  FormatPayoutVolumeThresholdCents,
   UpdateAccountInput,
 } from '@zoneless/shared-schemas';
 import { SettingsCardRow } from '../../shared';
@@ -150,6 +151,19 @@ export class AccountService {
   }
 
   /**
+   * Search connected accounts by email, name, or account id.
+   */
+  async SearchConnectedAccounts(
+    query: string,
+    limit = 8
+  ): Promise<ListResponse<Account>> {
+    return this.api.Call<ListResponse<Account>>('GET', 'accounts/search', {
+      query,
+      limit: String(limit),
+    });
+  }
+
+  /**
    * Create a login link for a connected account and open their dashboard in a new tab.
    */
   async CreateLoginLink(accountId: string): Promise<LoginLink> {
@@ -181,6 +195,23 @@ export class AccountService {
   }
 
   /**
+   * Secondary label shown in search results.
+   * Prefers the field that matches the query (email, then id), else email/id.
+   */
+  GetConnectedAccountSearchMatch(account: Account, query = ''): string {
+    const email =
+      account.email?.trim() || account.individual?.email?.trim() || '';
+    const normalizedQuery = query.trim().toLowerCase();
+
+    if (normalizedQuery) {
+      if (email.toLowerCase().includes(normalizedQuery)) return email;
+      if (account.id.toLowerCase().includes(normalizedQuery)) return account.id;
+    }
+
+    return email || account.id;
+  }
+
+  /**
    * Display title for the Business details settings card.
    */
   GetBusinessDetailsTitle(account: Account | null): string {
@@ -209,6 +240,59 @@ export class AccountService {
       {
         label: 'Privacy Policy',
         value: account.settings?.privacy_url || '—',
+        type: 'text',
+      },
+    ];
+  }
+
+  /**
+   * Display title for the Identity settings card.
+   */
+  GetIdentitySettingsTitle(account: Account | null): string {
+    if (!account?.settings?.identity?.provider) {
+      return 'Not configured';
+    }
+    const provider = account.settings.identity.provider;
+    return provider === 'didit' ? 'Didit' : provider;
+  }
+
+  GetIdentitySettingsCardRows(account: Account | null): SettingsCardRow[] {
+    if (!account) return [];
+
+    const providerSettings = account.settings?.identity?.didit;
+    const rules = account.settings?.identity?.rules;
+    const thresholdLabel =
+      FormatPayoutVolumeThresholdCents(rules?.payout_volume_threshold_cents) ??
+      'Disabled';
+    const overrideCount = rules?.country_thresholds?.length ?? 0;
+
+    return [
+      {
+        label: 'API key',
+        value: providerSettings?.api_key_set ? 'Configured' : 'Not set',
+        type: 'text',
+      },
+      {
+        label: 'Workflow ID',
+        value: providerSettings?.workflow_id?.trim() || '—',
+        type: 'text',
+      },
+      {
+        label: 'Webhook secret',
+        value: providerSettings?.webhook_secret_set ? 'Configured' : 'Not set',
+        type: 'text',
+      },
+      {
+        label: 'Default payout volume threshold',
+        value: thresholdLabel,
+        type: 'text',
+      },
+      {
+        label: 'Country overrides',
+        value:
+          overrideCount > 0
+            ? `${overrideCount} override${overrideCount === 1 ? '' : 's'}`
+            : 'None',
         type: 'text',
       },
     ];
