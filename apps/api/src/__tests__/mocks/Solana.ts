@@ -30,18 +30,21 @@ export class Solana {
   GetSOLBalance = jest.fn().mockResolvedValue(1);
   GetUSDCMintAddress = jest.fn().mockReturnValue('UsdcMint_test');
   GetPlanOwnerPublicKey = jest.fn().mockReturnValue('PlanOwner111');
+  GetIncomingDeposits = jest.fn().mockResolvedValue([]);
   GetIncomingUSDCDeposits = jest.fn().mockResolvedValue([]);
   BuildCheckoutPaymentTransaction = jest.fn().mockResolvedValue({
     unsigned_transaction: 'base64tx',
     estimated_fee_lamports: 5000,
     blockhash: 'blockhash123',
     last_valid_block_height: 100000,
+    min_context_slot: 99990,
   });
   BuildSubscribeTransaction = jest.fn().mockResolvedValue({
     unsigned_transaction: 'base64subscribe',
     estimated_fee_lamports: 5000,
     blockhash: 'blockhash123',
     last_valid_block_height: 100000,
+    min_context_slot: 99990,
   });
   BuildInitSubscriptionAuthorityTransaction = jest.fn().mockResolvedValue(null);
   WaitForSubscriptionAuthority = jest.fn().mockResolvedValue(undefined);
@@ -60,11 +63,8 @@ export class Solana {
     alreadyCollected: false,
   });
   FindExistingSubscriptionDelegation = jest.fn().mockResolvedValue(null);
-  CosignAndBroadcastCheckoutTransaction = jest.fn().mockResolvedValue({
+  ValidateAndBroadcastCheckoutTransaction = jest.fn().mockResolvedValue({
     signature: 'checkout_sig',
-  });
-  CosignAndBroadcastSubscribeTransaction = jest.fn().mockResolvedValue({
-    signature: 'subscribe_sig',
   });
   BuildBatchPayoutTransaction = jest.fn().mockResolvedValue({
     unsigned_transaction: 'base64tx',

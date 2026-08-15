@@ -35,20 +35,43 @@ export interface DoctorCommand {
   profile?: string;
 }
 
+/** Billing frequencies accepted by the Zoneless prices API. */
+export const recurringIntervals = [
+  'hour',
+  'day',
+  'week',
+  'month',
+  'year',
+] as const;
+
+export type RecurringInterval = (typeof recurringIntervals)[number];
+
+/** Recurring terms sent to the prices API, and echoed back in dry-run plans. */
+export interface RecurringPlan {
+  interval: RecurringInterval;
+  interval_count: number;
+  trial_period_days?: number;
+}
+
 export interface StoreInitCommand {
   name: 'store-init';
   amount: number;
   description?: string;
   dryRun: boolean;
   idempotencyKey?: string;
+  interval?: RecurringInterval;
+  intervalCount?: number;
   json: boolean;
   productName: string;
   profile?: string;
+  trialDays?: number;
 }
 
 export interface HelpCommand {
   name: 'help';
 }
+
+export type AgentSkillId = 'marketplace' | 'payments';
 
 export interface AgentSetupCommand {
   activationUrl?: string;
@@ -58,17 +81,53 @@ export interface AgentSetupCommand {
   newPlatform: boolean;
   platformName: string;
   profilePrefix?: string;
+  skillId: AgentSkillId;
 }
 
 export interface AgentInstallSkillCommand {
   json: boolean;
   name: 'agent-install-skill';
+  skillId: AgentSkillId;
 }
 
 export interface AuthStatusCommand {
   json: boolean;
   name: 'auth-status';
   profile?: string;
+}
+
+export interface AuthReconnectCommand {
+  activationUrl?: string;
+  authUrl?: string;
+  json: boolean;
+  name: 'auth-reconnect';
+  profile?: string;
+}
+
+export interface EnvSyncCommand {
+  includeWallet: boolean;
+  json: boolean;
+  name: 'env-sync';
+  profile?: string;
+  target?: string;
+}
+
+export const subscriptionWebhookEvents = [
+  'checkout.session.completed',
+  'invoice.paid',
+  'invoice.payment_failed',
+  'customer.subscription.updated',
+  'customer.subscription.deleted',
+] as const;
+
+export interface WebhookSyncCommand {
+  events: string[];
+  json: boolean;
+  name: 'webhook-sync';
+  preset: 'subscriptions' | null;
+  profile?: string;
+  target?: string;
+  url: string;
 }
 
 export interface WalletBackupCommand {
@@ -83,6 +142,9 @@ export type ParsedCommand =
   | AgentSetupCommand
   | AgentInstallSkillCommand
   | AuthStatusCommand
+  | AuthReconnectCommand
+  | EnvSyncCommand
+  | WebhookSyncCommand
   | WalletBackupCommand
   | HelpCommand;
 
@@ -103,6 +165,21 @@ export interface PriceResponse {
 export interface PaymentLinkResponse {
   id: string;
   url: string;
+}
+
+export interface WebhookEndpointResponse {
+  description?: string | null;
+  enabled_events: string[];
+  id: string;
+  metadata?: Record<string, string>;
+  secret?: string | null;
+  status?: string;
+  url: string;
+}
+
+export interface WebhookEndpointListResponse {
+  data: WebhookEndpointResponse[];
+  has_more: boolean;
 }
 
 export interface PartialResources {

@@ -17,6 +17,7 @@ export interface CheckoutPaymentTransaction {
   estimated_fee_lamports: number;
   blockhash: string;
   last_valid_block_height: number;
+  min_context_slot: number;
   fee_sponsored?: boolean;
   already_subscribed?: boolean;
   subscription_delegation_pda?: string;
@@ -170,7 +171,7 @@ export class CheckoutSessionService {
 
   /**
    * Confirm a checkout transaction. Fee-sponsored flows pass
-   * `signed_transaction` for the API to cosign and broadcast; buyer-pays
+   * `signed_transaction` for the API to validate and broadcast; buyer-pays
    * flows pass `signature` after the wallet has already sent the tx.
    */
   async ConfirmPayment(

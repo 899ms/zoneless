@@ -19,7 +19,12 @@ import type { SubscriptionModule } from './Subscription';
 import type { PaymentIntentModule } from './PaymentIntent';
 import type { ChargeModule } from './Charge';
 import type { PaymentLinkModule } from './PaymentLink';
-import { Solana, SolanaExplorerUrl } from './chains/Solana';
+import { SolanaExplorerUrl } from './chains/Solana';
+import {
+  GetSettlement,
+  SimulatedSignature,
+  type Settlement,
+} from './chains/Settlement';
 import { IsCheckoutFeeSponsored } from './AppConfig';
 import { AppError } from '../utils/AppError';
 import { ERRORS } from '../utils/Errors';
@@ -47,8 +52,9 @@ export interface PreparedCheckoutPayment {
   estimated_fee_lamports: number;
   blockhash: string;
   last_valid_block_height: number;
+  min_context_slot: number;
   /**
-   * True when TRANSACTION_FEE_PAYER_KEY is set and the API will cosign/broadcast.
+   * True when TRANSACTION_FEE_PAYER_KEY pre-signs and pays transaction costs.
    */
   fee_sponsored?: boolean;
   /**
@@ -113,7 +119,7 @@ export class CheckoutPaymentModule {
   private readonly paymentLinkModule: PaymentLinkModule | null;
   private readonly customerModule: CustomerModule | null;
   private readonly subscriptionModule: SubscriptionModule | null;
-  private readonly solana: Solana;
+  private readonly solana: Settlement;
 
   constructor(
     db: Database,
@@ -123,7 +129,7 @@ export class CheckoutPaymentModule {
     paymentIntentModule?: PaymentIntentModule,
     chargeModule?: ChargeModule,
     paymentLinkModule?: PaymentLinkModule,
-    solana?: Solana,
+    solana?: Settlement,
     customerModule?: CustomerModule,
     subscriptionModule?: SubscriptionModule
   ) {
@@ -139,7 +145,7 @@ export class CheckoutPaymentModule {
     this.paymentLinkModule = paymentLinkModule || null;
     this.customerModule = customerModule || null;
     this.subscriptionModule = subscriptionModule || null;
-    this.solana = solana || new Solana();
+    this.solana = solana || GetSettlement();
   }
 
   /**
@@ -352,6 +358,7 @@ export class CheckoutPaymentModule {
         estimated_fee_lamports: 0,
         blockhash: '',
         last_valid_block_height: 0,
+        min_context_slot: 0,
         already_subscribed: true,
         subscription_delegation_pda: existingPda,
       };
@@ -386,7 +393,8 @@ export class CheckoutPaymentModule {
    * Subscription, and collects the first period (unless trialing).
    *
    * Fee-sponsored confirms may pass `signed_transaction` instead of
-   * `signature`: the API cosigns with TRANSACTION_FEE_PAYER_KEY and broadcasts.
+   * `signature`: the API validates the existing fee payer and customer
+   * signatures before broadcasting.
    *
    * For subscription first-time wallets, pass `subscription_step: 'init_authority'`
    * after the init tx; the session stays open so the client can prepare subscribe.
@@ -437,7 +445,7 @@ export class CheckoutPaymentModule {
     ) {
       try {
         const broadcast =
-          await this.solana.CosignAndBroadcastCheckoutTransaction(
+          await this.solana.ValidateAndBroadcastCheckoutTransaction(
             options.signed_transaction
           );
         resolvedSignature = broadcast.signature;
@@ -484,6 +492,26 @@ export class CheckoutPaymentModule {
     }
 
     return this.ConfirmOneTimePayment(session, resolvedSignature);
+  }
+
+  /**
+   * Complete a checkout session as if the simulated wallet approved.
+   * Simulated test mode only.
+   */
+  async CompleteSimulatedCheckout(
+    urlSlug: string,
+    payerWallet: string,
+    customerDetails?: Omit<PrepareCheckoutPaymentInput, 'payer_wallet'>
+  ): Promise<CheckoutSession> {
+    const prepared = await this.PreparePayment(
+      urlSlug,
+      payerWallet,
+      customerDetails
+    );
+    return this.ConfirmPayment(
+      urlSlug,
+      SimulatedSignature(prepared.checkout_session, payerWallet)
+    );
   }
 
   /**

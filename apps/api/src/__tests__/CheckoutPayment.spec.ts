@@ -106,7 +106,7 @@ describe('CheckoutPaymentModule', () => {
       | 'VerifyCheckoutPayment'
       | 'VerifySubscribeTransaction'
       | 'CollectSubscriptionPayment'
-      | 'CosignAndBroadcastCheckoutTransaction'
+      | 'ValidateAndBroadcastCheckoutTransaction'
       | 'FindExistingSubscriptionDelegation'
       | 'WaitForSubscriptionAuthority'
       | 'GetUSDCMintAddress'
@@ -156,6 +156,7 @@ describe('CheckoutPaymentModule', () => {
         estimated_fee_lamports: 5000,
         blockhash: 'blockhash_1',
         last_valid_block_height: 100,
+        min_context_slot: 90,
       }),
       BuildInitSubscriptionAuthorityTransaction: jest
         .fn()
@@ -165,6 +166,7 @@ describe('CheckoutPaymentModule', () => {
         estimated_fee_lamports: 5000,
         blockhash: 'blockhash_1',
         last_valid_block_height: 100,
+        min_context_slot: 90,
       }),
       VerifyCheckoutPayment: jest.fn(),
       VerifySubscribeTransaction: jest.fn(),
@@ -172,8 +174,8 @@ describe('CheckoutPaymentModule', () => {
         signature: 'collect_sig',
         alreadyCollected: false,
       }),
-      CosignAndBroadcastCheckoutTransaction: jest.fn().mockResolvedValue({
-        signature: 'cosign_sig',
+      ValidateAndBroadcastCheckoutTransaction: jest.fn().mockResolvedValue({
+        signature: 'relay_sig',
       }),
       FindExistingSubscriptionDelegation: jest.fn().mockResolvedValue(null),
       WaitForSubscriptionAuthority: jest.fn().mockResolvedValue(undefined),
@@ -278,6 +280,7 @@ describe('CheckoutPaymentModule', () => {
           checkout_session: session.id,
           amount_total: 1000,
           unsigned_transaction: 'unsigned_tx_base64',
+          min_context_slot: 90,
         })
       );
     });
@@ -361,6 +364,7 @@ describe('CheckoutPaymentModule', () => {
         estimated_fee_lamports: 5000,
         blockhash: 'blockhash_1',
         last_valid_block_height: 100,
+        min_context_slot: 90,
       });
 
       jest
@@ -384,7 +388,7 @@ describe('CheckoutPaymentModule', () => {
   });
 
   describe('ConfirmPayment', () => {
-    it('should emit charge.succeeded then payment_intent.succeeded before completing the session', async () => {
+    it('should relay signed transactions before completing the session', async () => {
       const session = BuildOpenSession();
       const requiresConfirmation = BuildPaymentIntent('requires_confirmation');
       const processing = {
@@ -454,11 +458,18 @@ describe('CheckoutPaymentModule', () => {
         verified: true,
         payer_address: 'PayerWallet111',
         amount_cents: 1000,
-        failure_reason: null,
+      });
+      mockSolana.ValidateAndBroadcastCheckoutTransaction.mockResolvedValueOnce({
+        signature: 'sig_abc',
       });
 
-      const result = await module.ConfirmPayment(session.url_slug, 'sig_abc');
+      const result = await module.ConfirmPayment(session.url_slug, undefined, {
+        signed_transaction: 'signed_tx_base64',
+      });
 
+      expect(
+        mockSolana.ValidateAndBroadcastCheckoutTransaction
+      ).toHaveBeenCalledWith('signed_tx_base64');
       expect(eventService.Emit.mock.calls.map((call) => call[0])).toEqual([
         'payment_intent.processing',
         'charge.succeeded',

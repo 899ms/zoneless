@@ -1,7 +1,7 @@
 {
   "name": "@zoneless/source",
   "version": "0.1.0",
-  "description": "Open-source Stripe Connect alternative using USDC on Solana",
+  "description": "Your own open-source payments platform. Accept payments, manage subscriptions, and pay sellers globally in USDC from infrastructure you control.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -86,7 +86,7 @@
     "@angular/platform-browser-dynamic": "~20.3.0",
     "@angular/router": "~20.3.0",
     "@napi-rs/keyring": "^1.3.0",
-    "@solana-mobile/wallet-standard-mobile": "^0.5.3",
+    "@solana-mobile/mobile-wallet-adapter-protocol": "^2.2.9",
     "@solana/kit": "^6.10.0",
     "@solana/kit-plugin-rpc": "^0.11.1",
     "@solana/kit-plugin-signer": "^0.10.0",

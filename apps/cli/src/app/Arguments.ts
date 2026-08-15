@@ -1,22 +1,49 @@
 import { InvalidInput } from './Errors';
-import type { ParsedCommand, StoreInitCommand } from './Types';
+import { ValidateAgentSkillId } from './SkillInstaller';
+import {
+  recurringIntervals,
+  type ParsedCommand,
+  type RecurringInterval,
+  type StoreInitCommand,
+  subscriptionWebhookEvents,
+  type WebhookSyncCommand,
+} from './Types';
 
 const storeValueOptions = new Set([
   '--amount',
   '--description',
   '--idempotency-key',
+  '--interval',
+  '--interval-count',
   '--name',
   '--profile',
+  '--trial-days',
 ]);
 const storeBooleanOptions = new Set(['--dry-run', '--json']);
 const doctorValueOptions = new Set(['--profile']);
 const jsonBooleanOptions = new Set(['--json']);
+const reconnectValueOptions = new Set([
+  '--activation-url',
+  '--auth-url',
+  '--profile',
+]);
+const envSyncValueOptions = new Set(['--profile', '--target']);
+const envSyncBooleanOptions = new Set(['--include-wallet', '--json']);
+const webhookSyncValueOptions = new Set([
+  '--events',
+  '--preset',
+  '--profile',
+  '--target',
+  '--url',
+]);
+const installSkillValueOptions = new Set(['--skill']);
 const walletBackupValueOptions = new Set(['--output', '--profile']);
 const setupValueOptions = new Set([
   '--activation-url',
   '--auth-url',
   '--platform-name',
   '--profile-prefix',
+  '--skill',
 ]);
 const setupBooleanOptions = new Set(['--json', '--new-platform']);
 
@@ -57,13 +84,16 @@ export function ParseArguments(argumentsList: string[]): ParsedCommand {
     const commandArguments = argumentsList.slice(2);
     ValidateOptions(
       commandArguments,
-      new Set(),
+      installSkillValueOptions,
       jsonBooleanOptions,
       'agent install-skill'
     );
     return {
       name: 'agent-install-skill',
       json: commandArguments.includes('--json'),
+      skillId: ValidateAgentSkillId(
+        ReadOptionalOption(commandArguments, '--skill')
+      ),
     };
   }
 
@@ -80,6 +110,44 @@ export function ParseArguments(argumentsList: string[]): ParsedCommand {
       json: commandArguments.includes('--json'),
       profile: ReadOptionalOption(commandArguments, '--profile'),
     };
+  }
+
+  if (argumentsList[0] === 'auth' && argumentsList[1] === 'reconnect') {
+    const commandArguments = argumentsList.slice(2);
+    ValidateOptions(
+      commandArguments,
+      reconnectValueOptions,
+      jsonBooleanOptions,
+      'auth reconnect'
+    );
+    return {
+      activationUrl: ReadOptionalOption(commandArguments, '--activation-url'),
+      authUrl: ReadOptionalOption(commandArguments, '--auth-url'),
+      json: commandArguments.includes('--json'),
+      name: 'auth-reconnect',
+      profile: ReadOptionalOption(commandArguments, '--profile'),
+    };
+  }
+
+  if (argumentsList[0] === 'env' && argumentsList[1] === 'sync') {
+    const commandArguments = argumentsList.slice(2);
+    ValidateOptions(
+      commandArguments,
+      envSyncValueOptions,
+      envSyncBooleanOptions,
+      'env sync'
+    );
+    return {
+      includeWallet: commandArguments.includes('--include-wallet'),
+      json: commandArguments.includes('--json'),
+      name: 'env-sync',
+      profile: ReadOptionalOption(commandArguments, '--profile'),
+      target: ReadOptionalOption(commandArguments, '--target'),
+    };
+  }
+
+  if (argumentsList[0] === 'webhook' && argumentsList[1] === 'sync') {
+    return ParseWebhookSync(argumentsList.slice(2));
   }
 
   if (argumentsList[0] === 'wallet' && argumentsList[1] === 'backup') {
@@ -141,6 +209,7 @@ function ParseAgentSetup(argumentsList: string[]): ParsedCommand {
     newPlatform: argumentsList.includes('--new-platform'),
     platformName,
     profilePrefix,
+    skillId: ValidateAgentSkillId(ReadOptionalOption(argumentsList, '--skill')),
   };
 }
 
@@ -152,12 +221,20 @@ function ParseStoreInit(argumentsList: string[]): StoreInitCommand {
     throw InvalidInput('--name must contain between 1 and 200 characters.');
   }
 
-  const amountText = ReadRequiredOption(argumentsList, '--amount');
-  const amount = Number(amountText);
-  if (!Number.isSafeInteger(amount) || amount <= 0) {
-    throw InvalidInput(
-      '--amount must be a positive integer in minor units (200 means 2.00 USDC).'
-    );
+  const amount = ParsePositiveInteger(
+    ReadRequiredOption(argumentsList, '--amount'),
+    '--amount',
+    ' in minor units (200 means 2.00 USDC)'
+  );
+
+  const interval = ReadOptionalInterval(argumentsList);
+  const intervalCount = ReadOptionalPositiveInteger(
+    argumentsList,
+    '--interval-count'
+  );
+  const trialDays = ReadOptionalPositiveInteger(argumentsList, '--trial-days');
+  if (!interval && (intervalCount !== undefined || trialDays !== undefined)) {
+    throw InvalidInput('--interval-count and --trial-days require --interval.');
   }
 
   const description = ReadOptionalOption(argumentsList, '--description');
@@ -181,10 +258,69 @@ function ParseStoreInit(argumentsList: string[]): StoreInitCommand {
     description,
     dryRun: argumentsList.includes('--dry-run'),
     idempotencyKey,
+    interval,
+    intervalCount,
     json: argumentsList.includes('--json'),
     productName,
     profile: ReadOptionalOption(argumentsList, '--profile'),
+    trialDays,
   };
+}
+
+function ParseWebhookSync(argumentsList: string[]): WebhookSyncCommand {
+  ValidateOptions(
+    argumentsList,
+    webhookSyncValueOptions,
+    jsonBooleanOptions,
+    'webhook sync'
+  );
+
+  const rawUrl = ReadRequiredOption(argumentsList, '--url');
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(rawUrl);
+  } catch {
+    throw InvalidInput('--url must be a valid public HTTPS URL.');
+  }
+  if (parsedUrl.protocol !== 'https:') {
+    throw InvalidInput('--url must use HTTPS so Zoneless can deliver events.');
+  }
+
+  const presetValue = ReadOptionalOption(argumentsList, '--preset');
+  const eventsValue = ReadOptionalOption(argumentsList, '--events');
+  if (presetValue !== undefined && eventsValue !== undefined) {
+    throw InvalidInput('Use either --preset or --events, not both.');
+  }
+  if (presetValue !== undefined && presetValue !== 'subscriptions') {
+    throw InvalidInput('--preset must be subscriptions.');
+  }
+  const events =
+    eventsValue !== undefined
+      ? ParseWebhookEvents(eventsValue)
+      : [...subscriptionWebhookEvents];
+
+  return {
+    events,
+    json: argumentsList.includes('--json'),
+    name: 'webhook-sync',
+    preset: eventsValue !== undefined ? null : 'subscriptions',
+    profile: ReadOptionalOption(argumentsList, '--profile'),
+    target: ReadOptionalOption(argumentsList, '--target'),
+    url: parsedUrl.toString(),
+  };
+}
+
+function ParseWebhookEvents(value: string): string[] {
+  const events = [...new Set(value.split(',').map((event) => event.trim()))];
+  if (
+    events.length === 0 ||
+    events.some((event) => !/^[a-z0-9_.]+$/.test(event))
+  ) {
+    throw InvalidInput(
+      '--events must be a comma-separated list of Zoneless event types.'
+    );
+  }
+  return events;
 }
 
 function ValidateStoreOptions(argumentsList: string[]): void {
@@ -226,6 +362,41 @@ function ReadRequiredOption(
   const value = ReadOptionalOption(argumentsList, optionName);
   if (value === undefined) {
     throw InvalidInput(`${optionName} is required.`);
+  }
+  return value;
+}
+
+function ReadOptionalInterval(
+  argumentsList: string[]
+): RecurringInterval | undefined {
+  const value = ReadOptionalOption(argumentsList, '--interval');
+  if (value === undefined) return undefined;
+  if (!recurringIntervals.includes(value as RecurringInterval)) {
+    throw InvalidInput(
+      `--interval must be one of: ${recurringIntervals.join(', ')}.`
+    );
+  }
+  return value as RecurringInterval;
+}
+
+function ReadOptionalPositiveInteger(
+  argumentsList: string[],
+  optionName: string
+): number | undefined {
+  const value = ReadOptionalOption(argumentsList, optionName);
+  return value === undefined
+    ? undefined
+    : ParsePositiveInteger(value, optionName);
+}
+
+function ParsePositiveInteger(
+  rawValue: string,
+  optionName: string,
+  hint = ''
+): number {
+  const value = Number(rawValue);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw InvalidInput(`${optionName} must be a positive integer${hint}.`);
   }
   return value;
 }

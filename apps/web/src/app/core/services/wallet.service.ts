@@ -1,4 +1,9 @@
 import { Injectable, signal, WritableSignal } from '@angular/core';
+import {
+  transact,
+  type Account,
+  type MobileWallet,
+} from '@solana-mobile/mobile-wallet-adapter-protocol';
 import { getWallets } from '@wallet-standard/app';
 import type { Wallet, WalletAccount } from '@wallet-standard/base';
 
@@ -8,6 +13,16 @@ type ConnectFeature = {
 
 type DisconnectFeature = {
   disconnect: () => Promise<void>;
+};
+
+export type MobileWalletSession = {
+  payerWallet: string;
+  canSignTransaction: boolean;
+  SignUnsignedTransaction: (unsignedTxBase64: string) => Promise<Uint8Array>;
+  SignAndSendUnsignedTransaction: (
+    unsignedTxBase64: string,
+    minContextSlot: number
+  ) => Promise<Uint8Array>;
 };
 
 @Injectable({ providedIn: 'root' })
@@ -52,6 +67,72 @@ export class SolanaWalletService {
 
   HasWallet(): boolean {
     return this.wallet() !== null;
+  }
+
+  SupportsMobileWalletAdapter(): boolean {
+    return (
+      typeof navigator !== 'undefined' &&
+      /Android/i.test(navigator.userAgent) &&
+      !this.HasWallet()
+    );
+  }
+
+  async TransactWithMobileWallet<T>(
+    chain: 'solana:devnet' | 'solana:mainnet',
+    callback: (session: MobileWalletSession) => Promise<T>
+  ): Promise<T> {
+    if (typeof window === 'undefined') {
+      throw new Error('Mobile Wallet Adapter requires a browser');
+    }
+
+    return transact(async (wallet) => {
+      const authorization = await wallet.authorize({
+        chain,
+        identity: {
+          name: 'Zoneless',
+          uri: window.location.origin,
+          icon: 'assets/favicon/favicon-32x32.png',
+        },
+      });
+      const account = authorization.accounts[0];
+      if (!account) throw new Error('The wallet did not return an account');
+
+      return callback({
+        payerWallet: await this.GetMobileWalletAddress(account),
+        canSignTransaction: await this.SupportsMobileSignTransaction(wallet),
+        SignUnsignedTransaction: (unsignedTxBase64) =>
+          this.SignWithMobileWallet(wallet, unsignedTxBase64),
+        SignAndSendUnsignedTransaction: (unsignedTxBase64, minContextSlot) =>
+          this.SignAndSendWithMobileWallet(
+            wallet,
+            unsignedTxBase64,
+            minContextSlot
+          ),
+      });
+    });
+  }
+
+  IsMobileWalletNotFoundError(error: unknown): boolean {
+    let currentError: unknown = error;
+    for (let depth = 0; depth < 4; depth += 1) {
+      if (!currentError || typeof currentError !== 'object') return false;
+      const errorWithCause = currentError as {
+        code?: unknown;
+        message?: unknown;
+        cause?: unknown;
+      };
+      if (errorWithCause.code === 'ERROR_WALLET_NOT_FOUND') return true;
+      if (
+        typeof errorWithCause.message === 'string' &&
+        /can't find a wallet|no installed wallet|wallet not found|supports the mobile wallet protocol/i.test(
+          errorWithCause.message
+        )
+      ) {
+        return true;
+      }
+      currentError = errorWithCause.cause;
+    }
+    return false;
   }
 
   GetAddress(): string {
@@ -187,6 +268,53 @@ export class SolanaWalletService {
       binary += String.fromCharCode(bytes[i]);
     }
     return btoa(binary);
+  }
+
+  private async GetMobileWalletAddress(account: Account): Promise<string> {
+    const bs58 = await import('bs58');
+    if ('publicKey' in account) {
+      return bs58.default.encode(new Uint8Array(account.publicKey));
+    }
+    return bs58.default.encode(this.Base64ToBytes(account.address));
+  }
+
+  private async SupportsMobileSignTransaction(
+    wallet: MobileWallet
+  ): Promise<boolean> {
+    try {
+      const capabilities = await wallet.getCapabilities();
+      return capabilities.features.includes('solana:signTransactions');
+    } catch {
+      return false;
+    }
+  }
+
+  private async SignWithMobileWallet(
+    wallet: MobileWallet,
+    unsignedTxBase64: string
+  ): Promise<Uint8Array> {
+    const result = await wallet.signTransactions({
+      payloads: [unsignedTxBase64],
+    });
+    const signedTransaction = result.signed_payloads[0];
+    if (!signedTransaction) {
+      throw new Error('The wallet did not return a signed transaction');
+    }
+    return this.Base64ToBytes(signedTransaction);
+  }
+
+  private async SignAndSendWithMobileWallet(
+    wallet: MobileWallet,
+    unsignedTxBase64: string,
+    minContextSlot: number
+  ): Promise<Uint8Array> {
+    const result = await wallet.signAndSendTransactions({
+      payloads: [unsignedTxBase64],
+      options: { min_context_slot: minContextSlot },
+    });
+    const signature = result.signatures[0];
+    if (!signature) throw new Error('The wallet did not return a signature');
+    return this.Base64ToBytes(signature);
   }
 
   private async DecodeSecretKey(secretKey: string): Promise<Uint8Array> {
