@@ -23,6 +23,7 @@ import {
   AccountService,
   BalanceService,
   ExternalWalletService,
+  IdentityService,
   PersonService,
 } from '../../../../../data';
 import { MetaService } from '../../../../../core';
@@ -84,6 +85,7 @@ export class ConnectedAccountDetailViewComponent implements OnInit, OnDestroy {
   private readonly accountService = inject(AccountService);
   private readonly balanceService = inject(BalanceService);
   private readonly externalWalletService = inject(ExternalWalletService);
+  private readonly identityService = inject(IdentityService);
   private readonly personService = inject(PersonService);
   private readonly metaService = inject(MetaService);
   readonly actions = inject(ConnectedAccountActionsService);
@@ -106,6 +108,7 @@ export class ConnectedAccountDetailViewComponent implements OnInit, OnDestroy {
   availableBalance: WritableSignal<number> = signal(0);
   pendingBalance: WritableSignal<number> = signal(0);
   externalWallets: WritableSignal<ExternalWallet[]> = signal([]);
+  diditSessionIds: WritableSignal<string[]> = signal([]);
   idCopied: WritableSignal<boolean> = signal(false);
   private idCopiedTimer?: ReturnType<typeof setTimeout>;
 
@@ -407,6 +410,7 @@ export class ConnectedAccountDetailViewComponent implements OnInit, OnDestroy {
     if (this.account()?.id === id) return;
 
     this.account.set(null);
+    this.diditSessionIds.set([]);
     this.activeTab.set('overview');
     this.detailPanel.set('main');
     this.moneyMovementTab.set('payouts');
@@ -427,6 +431,7 @@ export class ConnectedAccountDetailViewComponent implements OnInit, OnDestroy {
       await Promise.all([
         this.RefreshBalance(id),
         this.LoadWallets(id, account),
+        this.LoadVerificationSessions(id),
       ]);
     } finally {
       this.loading.set(false);
@@ -462,6 +467,29 @@ export class ConnectedAccountDetailViewComponent implements OnInit, OnDestroy {
       this.actions.externalWallets.set(wallets);
     } catch {
       this.externalWallets.set([]);
+    }
+  }
+
+  private async LoadVerificationSessions(accountId: string): Promise<void> {
+    try {
+      const ids: string[] = [];
+      let startingAfter: string | undefined;
+      for (;;) {
+        const result = await this.identityService.ListVerificationSessions({
+          relatedAccount: accountId,
+          limit: 100,
+          startingAfter,
+        });
+        for (const session of result.data) {
+          const id = session.provider_session_id?.trim();
+          if (id) ids.push(id);
+        }
+        if (!result.has_more || result.data.length === 0) break;
+        startingAfter = result.data[result.data.length - 1].id;
+      }
+      this.diditSessionIds.set(ids);
+    } catch {
+      this.diditSessionIds.set([]);
     }
   }
 
