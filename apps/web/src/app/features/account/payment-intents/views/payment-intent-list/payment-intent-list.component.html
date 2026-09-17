@@ -1,5 +1,13 @@
 <div class="header-wrapper">
   <h1>Transactions</h1>
+  <button
+    type="button"
+    class="action-button action-button-dainty outline"
+    aria-label="Export CSV"
+    (click)="actions.OpenExport(GetExportDataset())"
+  >
+    <img class="button-icon-dark" src="assets/icons/download.svg" alt="" />
+  </button>
 </div>
 
 <div class="tab-bar">
