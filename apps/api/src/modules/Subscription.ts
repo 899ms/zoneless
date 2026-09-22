@@ -42,10 +42,11 @@ import {
   MigrateSubscriptionSchema,
   ResumeSubscriptionInput,
   ResumeSubscriptionSchema,
-  SubscriptionCreateItemSchema,
-  SubscriptionUpdateItemSchema,
-  UpdateSubscriptionInput,
   UpdateSubscriptionSchema,
+  UpdateSubscriptionInput,
+  CreateSubscriptionItemSchema,
+  UpdateSubscriptionItemSchema,
+  DeleteSubscriptionItemSchema,
 } from '@zoneless/shared-schemas';
 import { z } from 'zod';
 import {
@@ -53,8 +54,12 @@ import {
   SECONDS_PER_DAY,
 } from '../utils/RecurringInterval';
 
-type CreateItemInput = z.infer<typeof SubscriptionCreateItemSchema>;
-type UpdateItemInput = z.infer<typeof SubscriptionUpdateItemSchema>;
+type CreateItemInput = z.infer<
+  typeof import('@zoneless/shared-schemas').SubscriptionCreateItemSchema
+>;
+type UpdateItemInput = z.infer<
+  typeof import('@zoneless/shared-schemas').SubscriptionUpdateItemSchema
+>;
 
 const THREE_DAYS_SECONDS = 3 * SECONDS_PER_DAY;
 
@@ -65,6 +70,7 @@ export class SubscriptionModule {
   private readonly priceModule: PriceModule | null;
   private readonly invoiceModule: InvoiceModule | null;
   private readonly listHelper: ListHelper<SubscriptionType>;
+  private readonly itemsListHelper: ListHelper<SubscriptionItemType>;
 
   constructor(
     db: Database,
@@ -83,6 +89,13 @@ export class SubscriptionModule {
       orderByField: 'created',
       orderDirection: 'desc',
       urlPath: '/v1/subscriptions',
+      accountField: 'platform_account',
+    });
+    this.itemsListHelper = new ListHelper<SubscriptionItemType>(db, {
+      collection: 'SubscriptionItems',
+      orderByField: 'created',
+      orderDirection: 'asc',
+      urlPath: '/v1/subscription_items',
       accountField: 'platform_account',
     });
   }
@@ -762,6 +775,142 @@ export class SubscriptionModule {
   }
 
   // ───────────────────────────────────────────────────────────────────────────
+  // Public Subscription Item Methods
+  // ───────────────────────────────────────────────────────────────────────────
+
+  async CreateSubscriptionItem(
+    platformAccountId: string,
+    input: z.infer<typeof CreateSubscriptionItemSchema>
+  ): Promise<SubscriptionItemType> {
+    const validatedInput = ValidateUpdate(CreateSubscriptionItemSchema, input);
+    const subscription = await this.RequireSubscription(
+      validatedInput.subscription,
+      platformAccountId
+    );
+
+    const item = await this.InsertSubscriptionItem(
+      platformAccountId,
+      subscription.id,
+      validatedInput,
+      subscription.billing_cycle_anchor
+    );
+
+    if (this.eventService) {
+      const updatedSubscription = await this.GetSubscription(subscription.id);
+      await this.eventService.Emit(
+        'customer.subscription.updated',
+        platformAccountId,
+        updatedSubscription!
+      );
+    }
+
+    return item;
+  }
+
+  async GetSubscriptionItem(
+    id: string,
+    platformAccountId: string
+  ): Promise<SubscriptionItemType | null> {
+    const item = await this.db.Get<SubscriptionItemType>(
+      'SubscriptionItems',
+      id
+    );
+    if (!item || item.platform_account !== platformAccountId) {
+      return null;
+    }
+    return item;
+  }
+
+  async UpdateSubscriptionItem(
+    id: string,
+    input: z.infer<typeof UpdateSubscriptionItemSchema>,
+    platformAccountId: string
+  ): Promise<SubscriptionItemType> {
+    const validatedInput = ValidateUpdate(UpdateSubscriptionItemSchema, input);
+
+    const existing = await this.GetSubscriptionItem(id, platformAccountId);
+    if (!existing) {
+      throw new AppError(
+        ERRORS.SUBSCRIPTION_ITEM_NOT_FOUND.message,
+        ERRORS.SUBSCRIPTION_ITEM_NOT_FOUND.status,
+        ERRORS.SUBSCRIPTION_ITEM_NOT_FOUND.type
+      );
+    }
+    const subscription = await this.RequireSubscription(
+      existing.subscription,
+      platformAccountId
+    );
+
+    await this.ApplyItemUpdates(
+      platformAccountId,
+      subscription.id,
+      [{ id, ...validatedInput }],
+      subscription.billing_cycle_anchor
+    );
+
+    const updated = await this.GetSubscriptionItem(id, platformAccountId);
+
+    if (this.eventService) {
+      const updatedSubscription = await this.GetSubscription(subscription.id);
+      await this.eventService.Emit(
+        'customer.subscription.updated',
+        platformAccountId,
+        updatedSubscription!
+      );
+    }
+
+    return updated!;
+  }
+
+  async DeleteSubscriptionItem(
+    id: string,
+    input: z.infer<typeof DeleteSubscriptionItemSchema> = {},
+    platformAccountId: string
+  ) {
+    const existing = await this.GetSubscriptionItem(id, platformAccountId);
+    if (!existing) {
+      throw new AppError(
+        ERRORS.SUBSCRIPTION_ITEM_NOT_FOUND.message,
+        ERRORS.SUBSCRIPTION_ITEM_NOT_FOUND.status,
+        ERRORS.SUBSCRIPTION_ITEM_NOT_FOUND.type
+      );
+    }
+
+    const subscription = await this.RequireSubscription(
+      existing.subscription,
+      platformAccountId
+    );
+    void input.clear_usage;
+
+    await this.db.Delete('SubscriptionItems', id);
+
+    if (this.eventService) {
+      const updatedSubscription = await this.GetSubscription(subscription.id);
+      await this.eventService.Emit(
+        'customer.subscription.updated',
+        platformAccountId,
+        updatedSubscription!
+      );
+    }
+
+    return { id, object: 'subscription_item' as const, deleted: true };
+  }
+
+  async ListSubscriptionItems(
+    options: ListOptions & { subscription: string }
+  ): Promise<ListResult<SubscriptionItemType>> {
+    const { subscription, ...listOptions } = options;
+
+    return this.itemsListHelper.List({
+      ...listOptions,
+      filters: {
+        ...listOptions.filters,
+        subscription,
+      },
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
   // Object builders
   // ───────────────────────────────────────────────────────────────────────────
 
@@ -1139,7 +1288,7 @@ export class SubscriptionModule {
   ): Promise<SubscriptionItemType[]> {
     const items: SubscriptionItemType[] = [];
     for (const itemInput of itemsInput) {
-      const item = await this.CreateSubscriptionItem(
+      const item = await this.InsertSubscriptionItem(
         platformAccountId,
         subscriptionId,
         itemInput,
@@ -1150,7 +1299,7 @@ export class SubscriptionModule {
     return items;
   }
 
-  private async CreateSubscriptionItem(
+  private async InsertSubscriptionItem(
     platformAccountId: string,
     subscriptionId: string,
     itemInput: CreateItemInput | UpdateItemInput,
@@ -1229,7 +1378,7 @@ export class SubscriptionModule {
       }
 
       if (!itemInput.id) {
-        await this.CreateSubscriptionItem(
+        await this.InsertSubscriptionItem(
           platformAccountId,
           subscriptionId,
           itemInput,
@@ -1740,9 +1889,15 @@ export class SubscriptionModule {
     return Math.min(...ends);
   }
 
-  private async RequireSubscription(id: string): Promise<SubscriptionType> {
+  private async RequireSubscription(
+    id: string,
+    platformAccountId?: string
+  ): Promise<SubscriptionType> {
     const subscription = await this.GetSubscription(id);
-    if (!subscription) {
+    if (
+      !subscription ||
+      (platformAccountId && subscription.platform_account !== platformAccountId)
+    ) {
       throw new AppError(
         ERRORS.SUBSCRIPTION_NOT_FOUND.message,
         ERRORS.SUBSCRIPTION_NOT_FOUND.status,
